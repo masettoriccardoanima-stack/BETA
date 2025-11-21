@@ -702,14 +702,25 @@ window.__anima_router.installed = true;
 window.producedPieces = window.producedPieces || function (c) {
   if (!c) return 0;
   const tot = Math.max(0, Number(c.qtaPezzi || 0));
+
+  const deaccent = s => String(s||'')
+    .normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().trim();
+  const isOncePhase = (f) => {
+    if (f && (f.once === true || f.unaTantum === true)) return true;
+    const name = deaccent(f?.lav||'');
+    return /(^|[^a-z])preparazione\s+attivita([^a-z]|$)/.test(name);
+  };
+
   if (Array.isArray(c.fasi) && c.fasi.length) {
-    const arr = c.fasi.map(f => Math.max(0, Number(f.qtaProdotta || 0)));
+    const arr = c.fasi
+      .filter(f => !isOncePhase(f))
+      .map(f => Math.max(0, Number(f.qtaProdotta || 0)));
+
     const m = arr.length ? Math.min(...arr) : 0;
     return tot > 0 ? Math.min(m, tot) : m;
   }
   return Math.max(0, Number(c.qtaProdotta || 0));
 };
-
 
 // ===== ID generator uniforme: usa nextIdUnique se c'è, altrimenti counters in LS =====
 (function(){
@@ -3007,9 +3018,17 @@ window.createDDTRapidoFromCommessa = function(c){
   }catch(e){ console.error(e); alert('Errore creazione DDT'); }
 };
 
-// === Quantità prodotta/residua — Modello A (pezzi prodotti = min tra fasi) ===
 function producedPieces(c, oreRows){
   const tot = Math.max(1, Number(c?.qtaPezzi || 1));
+
+  // helper: riconosce fasi "una tantum" o "preparazione attività"
+  const deaccent = s => String(s||'')
+    .normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().trim();
+  const isOncePhase = (f) => {
+    if (f && (f.once === true || f.unaTantum === true)) return true;
+    const name = deaccent(f?.lav||'');
+    return /(^|[^a-z])preparazione\s+attivita([^a-z]|$)/.test(name);
+  };
 
   // eventi timbrature (fonte verità)
   const rows = Array.isArray(oreRows)
@@ -3022,22 +3041,37 @@ function producedPieces(c, oreRows){
   if (!ev.length){
     const fasiLegacy = Array.isArray(c?.fasi) ? c.fasi : [];
     if (!fasiLegacy.length) return Math.max(0, Math.min(tot, Number(c?.qtaProdotta || 0) || 0));
-    const arr = fasiLegacy.map(f => Math.max(0, Number(f?.qtaProdotta || 0)));
-    const min = arr.length ? Math.min(...arr) : 0;
+
+    const arr = fasiLegacy
+      .filter(f => !isOncePhase(f))
+      .map(f => Math.max(0, Number(f?.qtaProdotta || 0)));
+
+    if (!arr.length) return Math.max(0, Math.min(tot, Number(c?.qtaProdotta || 0) || 0));
+
+    const min = Math.min(...arr);
     return Math.max(0, Math.min(tot, min));
   }
 
   const fasi = Array.isArray(c?.fasi) ? c.fasi : [];
 
-  // modello A: pezzi prodotti = min tra fasi (ma derivato dagli eventi)
+  // modello A: pezzi prodotti = min tra fasi quantitative (derivato dagli eventi)
   if (fasi.length){
-    const perFase = fasi.map((f, idx) => {
+    const perFaseQuant = [];
+    fasi.forEach((f, idx) => {
+      if (isOncePhase(f)) return; // skip preparazione/unaTantum
       const s = ev
         .filter(o => Number(o.faseIdx) === Number(idx))
         .reduce((acc, o) => acc + Math.max(0, Number(o.qtaPezzi||0)), 0);
-      return Math.max(0, s);
+      perFaseQuant.push(Math.max(0, s));
     });
-    const min = perFase.length ? Math.min(...perFase) : 0;
+
+    if (!perFaseQuant.length){
+      // tutte fasi once → fallback a somma eventi
+      const sum = ev.reduce((acc, o) => acc + Math.max(0, Number(o.qtaPezzi||0)), 0);
+      return Math.max(0, Math.min(tot, sum));
+    }
+
+    const min = Math.min(...perFaseQuant);
     return Math.max(0, Math.min(tot, min));
   }
 
@@ -5879,8 +5913,13 @@ function chiediEtichetteECStampa(commessa) {
     let vNorm = v;
     if (k === 'commesseRows' && Array.isArray(v)) {
       try{
-        const fn = window.ensureCommessaRowIds;
-        vNorm = v.map(c => (typeof fn==='function' ? fn(c) : c));
+        const fnIds  = window.ensureCommessaRowIds;
+        const fnFasi = window.ensureCommessaRowFasi;
+        vNorm = v.map(c => {
+          let out = (typeof fnIds==='function')  ? fnIds(c)  : c;
+          out     = (typeof fnFasi==='function') ? fnFasi(out) : out;
+          return out;
+        });
       }catch{}
     }
 
@@ -12961,11 +13000,22 @@ const _fmtIT = d => d ? new Date(d).toLocaleDateString('it-IT') : '';
 const _todayISO = () => new Date().toISOString().slice(0,10);
 function _s(v){ return String(v||'').replace(/[<>&]/g, ch => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[ch])); }
 
-// commessa completa se: qtaProdotta >= qtaTotale E OGNI fase ha qtaProdotta >= qtaTotale
 function isCommessaCompleta(c){
   const tot = Math.max(1, Number(c?.qtaPezzi||1));
   const prod = Number(c?.qtaProdotta||0);
-  const fasiOk = Array.isArray(c?.fasi) ? c.fasi.every(f => Number(f?.qtaProdotta||0) >= tot) : true;
+
+  const deaccent = s => String(s||'')
+    .normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().trim();
+  const isOncePhase = (f) => {
+    if (f && (f.once === true || f.unaTantum === true)) return true;
+    const name = deaccent(f?.lav||'');
+    return /(^|[^a-z])preparazione\s+attivita([^a-z]|$)/.test(name);
+  };
+
+  const fasiOk = Array.isArray(c?.fasi)
+    ? c.fasi.filter(f => !isOncePhase(f)).every(f => Number(f?.qtaProdotta||0) >= tot)
+    : true;
+
   return prod >= tot && fasiOk;
 }
 
@@ -13029,6 +13079,15 @@ function buildEtichetteHTML(c, nColli){
   const piva = _s(cfg.companyVat || cfg.piva || '');
   const logo = cfg.logoDataUrl || '';
 
+  // ---- codice articolo da righeArticolo (o fallback) ----
+  const codici = Array.isArray(c?.righeArticolo)
+    ? c.righeArticolo.map(r => String(r?.codice||'').trim()).filter(Boolean)
+    : [];
+  const codiceTxt =
+    codici.length === 1 ? codici[0]
+    : codici.length > 1 ? (codici.slice(0,3).join(', ') + (codici.length>3 ? ` …(+${codici.length-3})` : ''))
+    : String(c?.articoloCodice || '');
+
   const stile = `
   <style>
     @page { size: A4 landscape; margin: 10mm; }
@@ -13059,6 +13118,7 @@ function buildEtichetteHTML(c, nColli){
             <div class="info" style="margin-top:10px">
               <div><span class="muted">Cliente:</span> <span class="big">${_s(c?.cliente||'-')}</span></div>
               <div><span class="muted">Commessa:</span> <span class="big">${_s(c?.id||'-')}</span></div>
+              <div><span class="muted">Codice articolo:</span> <span class="big">${_s(codiceTxt||'-')}</span></div>
               <div><span class="muted">Articolo/Assieme:</span> ${_s(c?.descrizione||'-')}</div>
               <div><span class="muted">Consegna prevista:</span> ${_fmtIT(c?.scadenza)||'-'}</div>
               <div><span class="muted">Data stampa:</span> ${now}</div>
@@ -15719,6 +15779,43 @@ window.ensureCommessaRowIds = window.ensureCommessaRowIds || function ensureComm
   }
 };
 
+// === Commesse: assicura fasi per-riga (scaffolding per refactor G) ===
+window.ensureCommessaRowFasi = window.ensureCommessaRowFasi || function ensureCommessaRowFasi(comm){
+  try{
+    if (!comm || typeof comm !== 'object') return comm;
+    const righe = Array.isArray(comm.righeArticolo) ? comm.righeArticolo : [];
+    if (!righe.length) return comm;
+
+    const fasiTemplate = Array.isArray(comm.fasi) ? comm.fasi : [];
+    if (!fasiTemplate.length) return comm;
+
+    let changed = false;
+
+    const newRighe = righe.map(r => {
+      if (!r || typeof r !== 'object') return r;
+      if (Array.isArray(r.fasi) && r.fasi.length) return r; // già ok
+
+      changed = true;
+      const copied = fasiTemplate.map(f => ({
+        lav: f.lav || '',
+        orePrevHHMM: f.orePrevHHMM || f.orePrevistaHHMM || '',
+        unaTantum: !!f.unaTantum,
+        once: !!f.once,
+        // qtaProdotta per quella riga parte da 0
+        qtaProdotta: 0
+      }));
+      return { ...r, fasi: copied };
+    });
+
+    return changed
+      ? { ...comm, righeArticolo: newRighe, updatedAt: new Date().toISOString() }
+      : comm;
+  }catch(e){
+    console.warn('ensureCommessaRowFasi', e);
+    return comm;
+  }
+};
+
 // utility: trova commessa per id
 window.findCommessaById = window.findCommessaById || function(id){
   try{
@@ -16531,17 +16628,24 @@ var TimbraturaMobileView = function(){
         const prod = (typeof window.producedPieces === 'function')
           ? window.producedPieces(c)
           : Math.max(0, Number(c.qtaProdotta || 0));
-        const justCompleted = (prod >= tot) && !c.__completedAt;
+                const justCompleted = (prod >= tot) && !c.__completedAt;
         if (justCompleted) {
+          // segno completamento una volta sola
           c.__completedAt = new Date().toISOString();
-          all[ix] = c; lsSet('commesseRows', all);
+          all[ix] = c; 
+          lsSet('commesseRows', all);
+
+          // usa la logica centrale: scarico + colli + etichette (no doppi popup)
           try {
-            if (typeof window.openEtichetteColliDialog === 'function') {
+            if (typeof window._maybeAutoScaricoAndLabels === 'function') {
+              window._maybeAutoScaricoAndLabels(c.id);
+            } else if (typeof window.openEtichetteColliDialog === 'function') {
+              // fallback vecchio, se per qualche motivo non trovasse _maybeAuto...
               window.openEtichetteColliDialog(c);
-            } else if (typeof window.triggerEtichetteFor === 'function') {
-              window.triggerEtichetteFor(c, {});
             }
-          } catch {}
+          } catch (e) {
+            console.warn('Etichette colli al completamento:', e);
+          }
         }
       }
     }catch{}
