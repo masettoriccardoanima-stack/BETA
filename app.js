@@ -1666,24 +1666,68 @@ window.hasRole = window.hasRole || function (role) {
   return String(u.role) === String(role);
 };
 
-// ============ LS namespace per separare BETA/STABLE ============
+// ============ LS namespace per separare BETA/STABLE (BETA:*) ============
 (function(){
   if (window.__ANIMA_APP_MOUNTED__) return;
 
-  const NS = window.__APP_NS__ || '';  // es: "ANIMA_BETA__"
-  function rawGet(k){ 
-    // fallback: se non trovi la chiave namespaced, leggi quella "vecchia"
-    const v = localStorage.getItem(NS + k);
-    if (v != null) return v;
-    return localStorage.getItem(k);
+  function isBetaEnv(){
+    try{
+      const s = JSON.parse(localStorage.getItem('appSettings')||'{}') || {};
+      const env = String(s.cloudEnv || s.supabaseEnv || '').toLowerCase();
+      if (env === 'beta') return true;
+      // fallback: canale app (se hai build separate)
+      return String(window.__APP_CHANNEL__||'').toLowerCase() === 'beta';
+    }catch{
+      return String(window.__APP_CHANNEL__||'').toLowerCase() === 'beta';
+    }
   }
-  window.lsGet = window.lsGet || function(k, def){
-    try { const v = rawGet(k); return v != null ? JSON.parse(v) : def; } catch { return def; }
+
+  function nsKey(k){
+    return isBetaEnv() ? ('BETA:' + k) : k;
+  }
+
+  function rawGet(k){
+    if (!isBetaEnv()) return localStorage.getItem(k);
+
+    const nk = nsKey(k);
+    const vN = localStorage.getItem(nk);
+    if (vN != null) return vN;
+
+    // fallback one-shot: leggi la chiave normale e migrala in BETA:
+    const v = localStorage.getItem(k);
+    if (v != null){
+      try { localStorage.setItem(nk, v); } catch {}
+    }
+    return v;
+  }
+
+  // OVERRIDE volutamente "forte" (non usare ||), così vale davvero in beta
+  window.lsGet = function(k, def){
+    try{
+      const v = rawGet(k);
+      return v != null ? JSON.parse(v) : def;
+    }catch{
+      return def;
+    }
   };
-  window.lsSet = window.lsSet || function(k, val){
-    try { localStorage.setItem(NS + k, JSON.stringify(val)); window.__anima_dirty = true; } catch {}
+
+  window.lsSet = function(k, val){
+    try{
+      localStorage.setItem(nsKey(k), JSON.stringify(val));
+      window.__anima_dirty = true;
+    }catch{}
   };
+
+  window.lsRemove = window.lsRemove || function(k){
+    try{ localStorage.removeItem(nsKey(k)); }catch{}
+  };
+
+  // debug soft
+  try{
+    if (isBetaEnv()) console.log('[LS] Namespace BETA attivo');
+  }catch{}
 })();
+
 
 /* ================== MAGAZZINO: movimenti & giacenze (helper generici) ================== */
 (function(){
