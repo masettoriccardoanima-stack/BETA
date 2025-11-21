@@ -2184,19 +2184,23 @@ window.ensureXLSX = window.ensureXLSX || (function () {
   }
 
 
-  const SYNC_KEYS = [
-  'appSettings',
-  'commesseRows',
-  'oreRows',
-  'magazzinoArticoli',
-  'magMovimenti',
-  'fattureRows',
-  'ddtRows',
-  'counters',
-  'clientiRows',
-  'fornitoriRows',
-  'ordiniFornitoriRows'
- ];
+    const SYNC_KEYS = [
+    'appSettings',
+    'commesseRows',
+    'oreRows',
+    // magazzino: sincronizza entrambe le chiavi (alias)
+    'magArticoli',
+    'magazzinoArticoli',
+    'magMovimenti',
+    'fattureRows',
+    'ddtRows',
+    // contatori: li esportiamo, ma non li forzeremo in pull (vedi applySnapshot)
+    'counters',
+    'clientiRows',
+    'fornitoriRows',
+    'ordiniFornitoriRows'
+  ];
+
     function getSettings(){
     try {
       const cfg = JSON.parse(localStorage.getItem('appSettings')||'{}') || {};
@@ -2235,14 +2239,28 @@ window.ensureXLSX = window.ensureXLSX || (function () {
     try { return await res.json(); } catch { return null; }
   }
 
-  function takeSnapshot(){
+    function takeSnapshot(){
     const snap = {};
+    const gGet = (typeof window.lsGet === 'function')
+      ? window.lsGet
+      : ((k, def)=>{ try{ return JSON.parse(localStorage.getItem(k)||'null') ?? def; }catch{ return def; } });
+
     for (const k of SYNC_KEYS){
-      try { snap[k] = JSON.parse(localStorage.getItem(k) || 'null'); }
+      try { snap[k] = gGet(k, null); }
       catch { snap[k] = null; }
     }
+
+    // allinea alias magazzino per evitare divergenze
+    if (snap.magArticoli != null && snap.magazzinoArticoli == null) {
+      snap.magazzinoArticoli = snap.magArticoli;
+    }
+    if (snap.magazzinoArticoli != null && snap.magArticoli == null) {
+      snap.magArticoli = snap.magazzinoArticoli;
+    }
+
     return snap;
   }
+
   function mergeAppSettings(localApp, remoteApp){
   // il remoto sovrascrive SOLO i campi che fornisce
   const out = { ...localApp, ...remoteApp };
@@ -2255,33 +2273,43 @@ window.ensureXLSX = window.ensureXLSX || (function () {
   }
   return out;
 }
-  function applySnapshot(snap){
-  if (!snap || typeof snap!=='object') return;
+    function applySnapshot(snap){
+    if (!snap || typeof snap!=='object') return;
 
-  // merge per array di record -> per id con preferenza updatedAt più recente
-  const preferNewer = (a, b) => {
-    const ta = Date.parse(a?.updatedAt||0) || 0;
-    const tb = Date.parse(b?.updatedAt||0) || 0;
-    if (ta && tb) return tb >= ta ? b : a;
-    if (tb && !ta) return b;
-    return a || b;
-  };
-  const mergeById = (localArr, remoteArr) => {
-    const map = new Map();
-    (Array.isArray(localArr)?localArr:[]).forEach(x => { if (x && x.id!=null) map.set(x.id, x); });
-    (Array.isArray(remoteArr)?remoteArr:[]).forEach(r => {
-      if (!r || r.id==null) return;
-      const prev = map.get(r.id);
-      map.set(r.id, prev ? preferNewer(prev, r) : r);
-    });
-    return Array.from(map.values());
-  };
+    // allinea alias magazzino prima del merge
+    if ('magArticoli' in snap && !('magazzinoArticoli' in snap)) {
+      snap.magazzinoArticoli = snap.magArticoli;
+    }
+    if ('magazzinoArticoli' in snap && !('magArticoli' in snap)) {
+      snap.magArticoli = snap.magazzinoArticoli;
+    }
 
-  // chiavi principali
-  const KEYS = [
-    'commesseRows','oreRows','magazzinoArticoli','magMovimenti',
-    'fattureRows','ddtRows','clientiRows','fornitoriRows','ordiniFornitoriRows'
-  ];
+    // merge per array di record -> per id con preferenza updatedAt più recente
+    const preferNewer = (a, b) => {
+      const ta = Date.parse(a?.updatedAt||0) || 0;
+      const tb = Date.parse(b?.updatedAt||0) || 0;
+      if (ta && tb) return tb >= ta ? b : a;
+      if (tb && !ta) return b;
+      return a || b;
+    };
+    const mergeById = (localArr, remoteArr) => {
+      const map = new Map();
+      (Array.isArray(localArr)?localArr:[]).forEach(x => { if (x && x.id!=null) map.set(x.id, x); });
+      (Array.isArray(remoteArr)?remoteArr:[]).forEach(r => {
+        if (!r || r.id==null) return;
+        const prev = map.get(r.id);
+        map.set(r.id, prev ? preferNewer(prev, r) : r);
+      });
+      return Array.from(map.values());
+    };
+
+    // chiavi principali (arrays)
+    const KEYS = [
+      'commesseRows','oreRows',
+      'magArticoli','magazzinoArticoli','magMovimenti',
+      'fattureRows','ddtRows',
+      'clientiRows','fornitoriRows','ordiniFornitoriRows'
+    ];
 
   // 1) appSettings: prendi quello con updatedAt più recente
   if ('appSettings' in snap) {
