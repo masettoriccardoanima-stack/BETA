@@ -3008,18 +3008,49 @@ window.createDDTRapidoFromCommessa = function(c){
 };
 
 // === Quantità prodotta/residua — Modello A (pezzi prodotti = min tra fasi) ===
-function producedPieces(c){
+function producedPieces(c, oreRows){
   const tot = Math.max(1, Number(c?.qtaPezzi || 1));
+
+  // eventi timbrature (fonte verità)
+  const rows = Array.isArray(oreRows)
+    ? oreRows
+    : (typeof window.lsGet === 'function' ? window.lsGet('oreRows', []) : []);
+  const jobId = String(c?.id || '');
+  const ev = (Array.isArray(rows)?rows:[]).filter(o => String(o.commessaId||'') === jobId);
+
+  // se non ho eventi, fallback legacy (compatibilità)
+  if (!ev.length){
+    const fasiLegacy = Array.isArray(c?.fasi) ? c.fasi : [];
+    if (!fasiLegacy.length) return Math.max(0, Math.min(tot, Number(c?.qtaProdotta || 0) || 0));
+    const arr = fasiLegacy.map(f => Math.max(0, Number(f?.qtaProdotta || 0)));
+    const min = arr.length ? Math.min(...arr) : 0;
+    return Math.max(0, Math.min(tot, min));
+  }
+
   const fasi = Array.isArray(c?.fasi) ? c.fasi : [];
-  if (!fasi.length) return Number(c?.qtaProdotta || 0) || 0;   // fallback legacy
-  const arr = fasi.map(f => Math.max(0, Number(f?.qtaProdotta || 0)));
-  const min = Math.min(...arr);
-  return Math.max(0, Math.min(tot, min));
+
+  // modello A: pezzi prodotti = min tra fasi (ma derivato dagli eventi)
+  if (fasi.length){
+    const perFase = fasi.map((f, idx) => {
+      const s = ev
+        .filter(o => Number(o.faseIdx) === Number(idx))
+        .reduce((acc, o) => acc + Math.max(0, Number(o.qtaPezzi||0)), 0);
+      return Math.max(0, s);
+    });
+    const min = perFase.length ? Math.min(...perFase) : 0;
+    return Math.max(0, Math.min(tot, min));
+  }
+
+  // senza fasi → totale pezzi = somma eventi commessa
+  const sum = ev.reduce((acc, o) => acc + Math.max(0, Number(o.qtaPezzi||0)), 0);
+  return Math.max(0, Math.min(tot, sum));
 }
-function residualPieces(c){
+
+function residualPieces(c, oreRows){
   const tot = Math.max(1, Number(c?.qtaPezzi || 1));
-  return Math.max(0, tot - producedPieces(c));
+  return Math.max(0, tot - producedPieces(c, oreRows));
 }
+
 
 // ================== Backup / Restore ==================
 function makeBackupBlob(){
@@ -3792,10 +3823,15 @@ window.prefillDDTfromCommessa = function(comm){
       comm.luogoConsegna ||
       (cli && (cli.sedeOperativa || cli.indirizzoOperativo || cli.indirizzo)) || '';
 
-    // riferimenti cliente: nr ordine o nr DDT cliente, ecc.
-    const rifCliente =
+    // riferimenti cliente: nr ordine o nr DDT cliente, ecc. (sempre testo)
+    const rifRaw =
       comm.rifCliente || comm.ordineCliente || comm.nrOrdineCliente ||
       comm.ddtCliente || comm.po || comm.nrCliente || '';
+
+    const rifCliente = (window.refClienteToText
+      ? window.refClienteToText(rifRaw)
+      : (typeof rifRaw === 'string' ? rifRaw : String(rifRaw||''))
+    ).trim();
 
     // causale trasporto se presente in commessa
     const causaleTrasporto = comm.causaleTrasporto || '';
@@ -3921,12 +3957,31 @@ window.prefillDDTfromCommessa = function(comm){
   return true;
 };
 
-  // --- guardia: richiede login ---
-  global.requireLogin = async function () {
-    const u = await whoAmI();
-    if (!u) { if (location.hash !== '#/login') location.hash = '#/login'; throw new Error('unauthenticated'); }
-    return u;
-  };
+  // --- guardia: richiede login (Supabase-first, no backend → no force) ---
+global.requireLogin = async function () {
+  // 1) prova il nuovo sistema Supabase-aware se c'è
+  try {
+    if (global.apiMe) {
+      const uSb = await global.apiMe();
+      if (uSb) return uSb;
+    }
+  } catch {}
+
+  // 2) fallback legacy (solo se proprio necessario)
+  let u = null;
+  try { u = await whoAmI(); } catch {}
+
+  // 3) rispetta authRequired
+  const S = (()=>{ try{ return JSON.parse(localStorage.getItem('appSettings')||'{}')||{} }catch{return{}} })();
+  const mustLogin = !!S.authRequired;
+
+  if (!u && mustLogin) {
+    if (location.hash !== '#/login') location.hash = '#/login';
+    throw new Error('unauthenticated');
+  }
+
+  return u;
+};
 
   // --- props comodi per disabilitare bottoni in sola lettura ---
   global.roProps = function (title='Sola lettura') { return global.isReadOnlyUser() ? { disabled:true, title } : {}; };
@@ -5790,15 +5845,16 @@ function chiediEtichetteECStampa(commessa) {
   }
 }
 
-/* ================== HOOK COMPLETAMENTO COMMESSA → ETICHETTE ================== */
+/* ================== HOOK COMPLETAMENTO COMMESSA → ETICHETTE (v2 produzione-first) ================== */
 (function(){
-  if (window.__ANIMA_APP_MOUNTED__) return;
+  if (window.__ANIMA_LABELS_HOOK_V2__) return; // idempotente
+  window.__ANIMA_LABELS_HOOK_V2__ = true;
 
   const lsGet = window.lsGet || ((k,d)=>{ try{ const v=JSON.parse(localStorage.getItem(k)); return (v??d);}catch{return d;}});
   const origLsSet = window.lsSet || ((k,v)=>{ try{ localStorage.setItem(k, JSON.stringify(v)); }catch{} });
 
   function isClosed(row){
-    // prova varianti comuni di “fine commessa”
+    // fallback legacy per chiusura manuale
     return (
       row?.stato === 'Consegnata' ||
       row?.stato === 'Chiusa' ||
@@ -5808,25 +5864,42 @@ function chiediEtichetteECStampa(commessa) {
     );
   }
 
+  function isComplete(row){
+    try{
+      if (typeof window.isCommessaCompleta === 'function') return !!window.isCommessaCompleta(row);
+    }catch{}
+    return isClosed(row);
+  }
+
   window.lsSet = function(k, v){
-    // prendi snapshot PRIMA
     let prev = null;
     if (k === 'commesseRows') { prev = lsGet('commesseRows', []); }
 
-    // esegui set
-    const ret = origLsSet(k, v);
+    // normalizza rowId (se helper disponibile)
+    let vNorm = v;
+    if (k === 'commesseRows' && Array.isArray(v)) {
+      try{
+        const fn = window.ensureCommessaRowIds;
+        vNorm = v.map(c => (typeof fn==='function' ? fn(c) : c));
+      }catch{}
+    }
 
-    // dopo il set, se sono commesseRows → confronta e lancia popup per nuove chiusure
+    const ret = origLsSet(k, vNorm);
+
     if (k === 'commesseRows') {
       try {
-        const next = Array.isArray(v) ? v : (lsGet('commesseRows', []) || []);
+        const next = Array.isArray(vNorm) ? vNorm : (lsGet('commesseRows', []) || []);
         const byIdPrev = new Map((prev||[]).map(x => [x.id, x]));
         for (const n of (next||[])) {
           const p = byIdPrev.get(n.id);
-          const wasClosed = p ? isClosed(p) : false;
-          const nowClosed = isClosed(n);
-          if (!wasClosed && nowClosed) {
-            try { if (typeof chiediEtichetteECStampa === 'function') chiediEtichetteECStampa(n); } catch {}
+          const wasComplete = p ? isComplete(p) : false;
+          const nowComplete = isComplete(n);
+          if (!wasComplete && nowComplete) {
+            if (typeof window._maybeAutoScaricoAndLabels === 'function') {
+              try { window._maybeAutoScaricoAndLabels(n.id); } catch {}
+            } else if (typeof chiediEtichetteECStampa === 'function') {
+              try { chiediEtichetteECStampa(n); } catch {}
+            }
           }
         }
       } catch {}
@@ -5834,6 +5907,7 @@ function chiediEtichetteECStampa(commessa) {
     return ret;
   };
 })();
+
 
 /* ================== COMMESSE (multi-selezione → DDT, import PDF ordine, multi-articolo) ================== */
   // === Helpers elenco Commesse (idempotenti) ===
@@ -5915,6 +5989,40 @@ function CommesseView({ query = '' }) {
     const perPhase = c.fasi.filter(f => !(f?.unaTantum || f?.once)).map(f => Math.max(0, Number(f.qtaProdotta || 0)));
     return perPhase.length ? Math.min(tot, Math.min(...perPhase)) : 0;
   };
+
+  // --- qta spedita derivata dai DDT collegati ---
+  const shippedPieces = window.shippedPieces || function(c){
+    try{
+      const ddtRows = lsGet('ddtRows', []);
+      const jobId = String(c?.id || '');
+      if (!jobId) return 0;
+
+      let sum = 0;
+      (Array.isArray(ddtRows) ? ddtRows : []).forEach(ddt => {
+        if (!ddt) return;
+        if (ddt.annullato === true || String(ddt.stato||'') === 'Annullato') return;
+
+        // fallback: id commessa letto dall'header DDT
+        const ddtJobId =
+          String(ddt.commessaId || ddt.commessaRif || ddt.__fromCommessaId || '');
+
+        (Array.isArray(ddt.righe) ? ddt.righe : []).forEach(r => {
+          if (!r) return;
+          const rowJobId = String(r.commessaId || ddtJobId || '');
+          if (rowJobId !== jobId) return;
+
+          const q = Number(r.qta ?? r.quantita ?? 0);
+          if (Number.isFinite(q)) sum += q;
+        });
+      });
+
+      return Math.max(0, sum);
+    }catch{
+      return 0;
+    }
+  };
+  // esponi anche globalmente (utile per report futuri)
+  window.shippedPieces = window.shippedPieces || shippedPieces;
 
   // --- dati di base ---
   const app       = React.useMemo(() => lsGet('appSettings', {}) || {}, []);
@@ -6267,142 +6375,151 @@ window.delCommessa     = window.delCommessa     || delCommessa;
 
   // --- DDT: singola & multiple ---
   function timbrUrl(id){ return `#/timbratura?job=${encodeURIComponent(id||'')}`; }
-  function creaDDTdaCommessa(commessa){
-  try{
+    function creaDDTdaCommessa(commessa){
+    try{
+      const lsGet = window.lsGet || ((k,d)=>{ try{ return JSON.parse(localStorage.getItem(k)||'null') ?? d; }catch{ return d; }});
+      const articoli = lsGet('magArticoli', []) || [];
+      const cli = (lsGet('clientiRows', [])||[]).find(x => String(x.id)===String(commessa.clienteId)) || null;
+      const todayISO = ()=> new Date().toISOString().slice(0,10);
+
+      // righe commessa (nuovo modello o fallback)
+      const righeSrc =
+        (Array.isArray(commessa.righeArticolo) && commessa.righeArticolo.length)
+          ? commessa.righeArticolo
+          : [{
+              codice: commessa.articoloCodice || '',
+              descrizione: commessa.descrizione || '',
+              um: commessa.articoloUM || 'PZ',
+              qta: Math.max(1, Number(commessa.qtaPezzi || 1)),
+              note: ''
+            }];
+
+      const righeDDT = righeSrc.map(r => {
+        const cod = String(r.codice || r.articoloCodice || '').trim();
+        const a = articoli.find(x => String(x.codice||x.id||'').trim() === cod) || null;
+
+        const um = String(r.um || r.UM || a?.um || a?.UM || 'PZ').toUpperCase();
+        const prezzo = Number(r.prezzo ?? r.prezzoUnitario ?? a?.prezzo ?? a?.costo ?? 0) || 0;
+
+        return {
+          commessaRowId: String(r.rowId || r.rowID || ''),
+          codice: cod,
+          descrizione: r.descrizione || r.articoloDescr || a?.descrizione || a?.descr || '',
+          UM: um,
+          um,
+          qta: Number(r.qta || r.quantita || 0) || 0,
+          prezzo,
+          note: r.note || commessa.noteSpedizione || ''
+        };
+      });
+        
+      const rifClienteTxt =
+        (window.refClienteToText
+          ? window.refClienteToText(commessa?.rifCliente)
+          : '') ||
+        (window.orderRefFor ? window.orderRefFor(commessa) : '') ||
+        '';
+
+      const pf = {
+        id: (typeof window.nextIdDDT === 'function')
+              ? window.nextIdDDT()
+              : `DDT-${new Date().getFullYear()}-${String(Date.now()).slice(-3)}`,
+        data: todayISO(),
+
+        clienteId: commessa.clienteId || '',
+        clienteRagione: commessa.cliente || (cli && (cli.ragione||cli.ragioneSociale||'')) || '',
+        commessaId: commessa.id || '',
+        commessaRif: commessa.id || '',
+
+        luogoConsegna: commessa.luogoConsegna || (cli && (cli.sedeOperativa || cli.sede) || ''),
+        causaleTrasporto: commessa.causaleTrasporto || '',
+
+        rifCliente: rifClienteTxt,
+        rifClienteTipo: (commessa.rifCliente && commessa.rifCliente.tipo) || commessa.rifClienteTipo || '',
+        rifClienteNum:  (commessa.rifCliente && commessa.rifCliente.numero) || commessa.rifClienteNum || '',
+        rifClienteData: (commessa.rifCliente && commessa.rifCliente.data) || commessa.rifClienteData || '',
+
+        note: commessa.noteSpedizione || commessa.note || '',
+        righe: righeDDT
+      };
+
+      localStorage.setItem('prefillDDT', JSON.stringify(pf));
+      location.hash = '#/ddt';
+    }catch(e){
+      alert('Impossibile preparare il DDT: ' + (e && e.message ? e.message : e));
+    }
+  }
+    function creaDDTdaSelezionate(){
+    const list = selectedList;
+    if (!list.length) { alert('Nessuna commessa selezionata.'); return; }
+
     const lsGet = window.lsGet || ((k,d)=>{ try{ return JSON.parse(localStorage.getItem(k)||'null') ?? d; }catch{ return d; }});
     const articoli = lsGet('magArticoli', []) || [];
-    const cli = (lsGet('clientiRows', [])||[]).find(x => String(x.id)===String(commessa.clienteId)) || null;
     const todayISO = ()=> new Date().toISOString().slice(0,10);
 
-    // --- costruzione righe DDT (multi-articolo friendly)
-const righeDDT = (Array.isArray(commessa.righeArticolo) && commessa.righeArticolo.length > 0)
-  ? commessa.righeArticolo.map(r => {
-      const a = articoli.find(x => String(x.codice||'').trim() === String(r.codice||'').trim()) || null;
-      return {
-        codice: r.codice || '',
-        descrizione: r.descrizione || (a && a.descrizione) || '',
-        UM: String(r.um || (a && a.um) || 'PZ').toUpperCase(), // 👈 UM sempre maiuscolo
-        qta: Number(r.qta || 0) || 0,
-        note: r.note || commessa.noteSpedizione || ''
-      };
-    })
-  : (function(){
-      // fallback back-compat: singola riga
-      const a = articoli.find(x => String(x.codice||'').trim() === String(commessa.articoloCodice||'').trim()) || null;
-      return [{
-        codice: commessa.articoloCodice || '',
-        descrizione: (a && a.descrizione) || commessa.descrizione || '',
-        UM: String((a && a.um) || commessa.articoloUM || 'PZ').toUpperCase(), // 👈 UM maiuscolo
-        qta: Math.max(1, Number(commessa.qtaPezzi || 1)),
-        note: commessa.noteSpedizione || ''
-      }];
-    })();
-
-const pf = {
-  data: (typeof todayISO === 'function' ? todayISO() : new Date().toISOString().slice(0,10)),
-  clienteId:     commessa.clienteId || '',
-  cliente:       commessa.cliente || (cli && (cli.ragioneSociale || '')) || '',
-  commessaRif:   commessa.id || '',
-  luogoConsegna: commessa.luogoConsegna || (cli && (cli.sedeOperativa || cli.sede) || ''),
-  rifClienteTipo: (commessa.rifCliente && commessa.rifCliente.tipo) || '',
-  rifClienteNum:  (commessa.rifCliente && commessa.rifCliente.numero) || '',
-  rifClienteData: (commessa.rifCliente && commessa.rifCliente.data) || '',
-  righe: righeDDT
-};
-
-    localStorage.setItem('prefillDDT', JSON.stringify(pf));
-    location.hash = '#/ddt';
-  }catch(e){
-    alert('Impossibile preparare il DDT: ' + (e && e.message ? e.message : e));
-  }
-}
-  function creaDDTdaSelezionate(){
-    const list = selectedList; if (!list.length) { alert('Nessuna commessa selezionata.'); return; }
     const clientIds = Array.from(new Set(list.map(c => String(c.clienteId||''))));
     if (clientIds.length > 1) { alert('Seleziona commesse dello stesso cliente.'); return; }
 
     const clienteId = clientIds[0] || '';
     const cli = (clienti||[]).find(x => String(x.id)===clienteId) || null;
-    const articoli = Array.isArray(articoliA) ? articoliA : [];
 
-      const righe = list.map(c => {
-      // prendo le righe articolo (nuovo modello) o, in fallback, c.righe
-      const righeArt = Array.isArray(c.righeArticolo)
-        ? c.righeArticolo
-        : (Array.isArray(c.righe) ? c.righe : []);
+    const righe = [];
+    list.forEach(c=>{
+      const righeSrc =
+        (Array.isArray(c.righeArticolo) && c.righeArticolo.length)
+          ? c.righeArticolo
+          : (Array.isArray(c.righe) ? c.righe : []);
 
-      const firstRiga = righeArt[0] || null;
+      righeSrc.forEach(r=>{
+        const cod = String(r.codice || r.articoloCodice || '').trim();
+        if (!cod && !r.descrizione) return;
 
-      // codice riga per il DDT:
-      // - se multi-articolo → "Multi (N)" (o eventuale articoloCodice di sintesi)
-      // - se singola riga → codice di quella riga / articoloCodice
-      let code;
-      if (Array.isArray(c.righeArticolo) && c.righeArticolo.length > 1) {
-        code =
-          (c.articoloCodice && String(c.articoloCodice).trim()) ||
-          `Multi (${c.righeArticolo.length})`;
-      } else {
-        code =
-          c.articoloCodice ||
-          (firstRiga && (firstRiga.codice || firstRiga.articoloCodice)) ||
-          '';
-      }
+        const a = articoli.find(x => String(x.codice||x.id||'').trim() === cod) || null;
+        const um = String(r.um || r.UM || a?.um || a?.UM || 'PZ').toUpperCase();
+        const prezzo = Number(r.prezzo ?? r.prezzoUnitario ?? a?.prezzo ?? a?.costo ?? 0) || 0;
 
-      // articolo da anagrafica per recuperare UM/descrizione se presente
-      const art = articoli.find(
-        a => String(a.codice || '').trim().toLowerCase() === String(code || '').trim().toLowerCase()
-      ) || null;
-
-      const UM = String(
-        (art && art.um) ||
-        c.articoloUM ||
-        (firstRiga && (firstRiga.um || firstRiga.UM)) ||
-        'PZ'
-      ).toUpperCase();
-
-      const descr =
-        (art && art.descrizione) ||
-        c.descrizione ||
-        (firstRiga && (firstRiga.descrizione || firstRiga.articoloDescr)) ||
-        '';
-
-      const qtaDefault = (
-        +c.qtaProdotta > 0
-          ? +c.qtaProdotta
-          : (
-              +c.qtaPezzi ||
-              (firstRiga && (+firstRiga.qta || +firstRiga.quantita)) ||
-              1
-            )
-      );
-
-      return {
-        codice: code,
-        descrizione: descr,
-        UM,
-        qta: qtaDefault,
-        note: c.noteSpedizione || ''
-      };
+        righe.push({
+          commessaId: c.id || '',
+          commessaRowId: String(r.rowId || r.rowID || ''),
+          codice: cod,
+          descrizione: r.descrizione || r.articoloDescr || a?.descrizione || a?.descr || c.descrizione || '',
+          UM: um,
+          um,
+          qta: Number(r.qta || r.quantita || c.qtaPezzi || 1) || 1,
+          prezzo,
+          note: r.note || c.noteSpedizione || ''
+        });
+      });
     });
 
-    const luogoCz = (() => {
-      const setLC = Array.from(new Set(list.map(c => c.luogoConsegna || ''))).filter(Boolean);
-      if (setLC.length === 1) return setLC[0];
-      return (cli && (cli.sedeOperativa || cli.sede)) || '';
-    })();
+    if (!righe.length) { alert('Nessuna riga valida nelle commesse selezionate.'); return; }
+
+        const rifClienteTxt =
+      (window.refClienteToText ? window.refClienteToText(list[0]?.rifCliente) : '') ||
+      (window.orderRefFor ? window.orderRefFor(list[0]) : '') ||
+      '';
 
     const pf = {
+      id: (typeof window.nextIdDDT === 'function')
+            ? window.nextIdDDT()
+            : `DDT-${new Date().getFullYear()}-${String(Date.now()).slice(-3)}`,
       data: todayISO(),
       clienteId,
-      cliente: (cli && (cli.ragioneSociale || cli.nome || cli.denominazione)) || (list[0].cliente || ''),
-      luogoConsegna: luogoCz,
-      rifClienteTipo: (list[0].rifCliente && list[0].rifCliente.tipo) || '',
-      rifClienteNum:  (list[0].rifCliente && list[0].rifCliente.numero) || '',
-      rifClienteData: (list[0].rifCliente && list[0].rifCliente.data) || '',
+      clienteRagione: list[0].cliente || (cli && (cli.ragione||cli.ragioneSociale||'')) || '',
+      luogoConsegna: list[0].luogoConsegna || (cli && (cli.sedeOperativa || cli.sede) || ''),
+      causaleTrasporto: list[0].causaleTrasporto || '',
+      note: list.map(c=>c.noteSpedizione||c.note||'').filter(Boolean).join(' | '),
       commesseIds: list.map(c=>c.id),
+
+      rifCliente: rifClienteTxt,
+      rifClienteTipo: list[0].rifClienteTipo || '',
+      rifClienteNum:  list[0].rifClienteNum  || '',
+      rifClienteData: list[0].rifClienteData || '',
+
       righe
     };
-    try { localStorage.setItem('prefillDDT', JSON.stringify(pf)); } catch {}
+
+    localStorage.setItem('prefillDDT', JSON.stringify(pf));
     location.hash = '#/ddt';
   }
 
@@ -6593,18 +6710,23 @@ const pf = {
         : e('table', { className:'table' },
             e('thead', null,
               e('tr', null,
-                // checkbox header (se ce l'hai già, lascia questo)
+                // checkbox header
                 e('th', {style:{width:36, textAlign:'center'}},
-                  e('input', {type:'checkbox',onChange: ()=> toggleAll(filtered),checked: filtered.length > 0 && filtered.every(r => sel[r.id])})
+                  e('input', {
+                    type:'checkbox',
+                    onChange: ()=> toggleAll(),
+                    checked: filtered.length > 0 && filtered.every(r => sel[r.id])
+                  })
                 ),
                 e('th', null, 'ID'),
                 e('th', null, 'Cliente'),
                 e('th', null, 'Descrizione'),
-                e('th', null, 'Rif. cliente'),     // ⬅️ NUOVA COLONNA
+                e('th', null, 'Rif. cliente'),
                 e('th', {className:'right'}, 'Q.tà'),
+                e('th', {className:'right'}, 'Spedita'),   // 👈 nuova colonna
                 e('th', null, 'Scadenza'),
                 e('th', null, 'Azioni')
-                )
+              )
             ),
               e('tbody', null,
               filtered
@@ -6651,6 +6773,7 @@ const pf = {
                     })()),
 
                   e('td', {className:'right'}, String(c.qtaPezzi||1)),
+                  e('td', {className:'right'}, String(shippedPieces(c) || 0)),
                   e('td', null, c.scadenza || ''),
                   e('td', null,
                     e('button', { className:'btn btn-outline', onClick:()=>window.printCommessa && window.printCommessa(c) }, 'Stampa'), ' ',
@@ -8657,6 +8780,7 @@ window.buildDDTFromCommessa = window.buildDDTFromCommessa || function buildDDTFr
 
   const rows = (righe.length > 0)
     ? righe.map(r => ({
+        commessaRowId: String(r.rowId || r.rowID || ''),
         codice: String(r.codice || r.articoloCodice || ''),
         descrizione: String(r.descrizione || ''),
         um: String(r.um || 'PZ'),
@@ -8694,6 +8818,7 @@ window.normalizeDDTRecord = window.normalizeDDTRecord || function normalizeDDTRe
   const rowsSrc = Array.isArray(S.articoli) ? S.articoli
                  : (Array.isArray(S.righe) ? S.righe : []);
   const rows = (rowsSrc || []).map(r => ({
+    commessaRowId: String(r.commessaRowId || r.commessaRowID || r.rowId || ''),
     codice: String(r.codice || r.articoloCodice || '').trim(),
     descrizione: String(r.descrizione || '').trim(),
     um: String(r.um || 'PZ').trim(),
@@ -8764,6 +8889,15 @@ function DDTView(){
       // intestazione
       if (!next.clienteRagione) next.clienteRagione = pre.clienteRagione;
       if (!next.note)           next.note           = pre.note;
+
+      // rif. cliente (normalizzato)
+      if (!next.rifCliente) {
+        const rawRef = pre.rifCliente || pre.rifClienteTipo || '';
+        next.rifCliente = (window.refClienteToText
+          ? window.refClienteToText(rawRef)
+          : (typeof rawRef === 'string' ? rawRef : String(rawRef||''))
+        ).trim();
+      }
 
       // metadata link alla commessa
       if (!next.commessaId) next.commessaId = pre.commessaId;
@@ -9002,7 +9136,7 @@ React.useEffect(() => {
     location.hash = '#/fatture';
   }
 
-  // prefill da altre viste (forza UM maiuscolo se arriva "um")
+    // prefill da altre viste (forza UM maiuscolo se arriva "um")
   React.useEffect(()=>{
     try{
       const raw = localStorage.getItem('prefillDDT');
@@ -9010,17 +9144,36 @@ React.useEffect(() => {
       localStorage.removeItem('prefillDDT');
       const pf = JSON.parse(raw);
 
+      // --- NORMALIZZA RIF. CLIENTE (evita [object Object]) ---
+      let rifTxt = '';
+      if (pf && typeof pf.rifCliente === 'object' && pf.rifCliente !== null) {
+        const o = pf.rifCliente || {};
+        rifTxt = [
+          o.tipo || pf.rifClienteTipo,
+          o.numero || o.num || pf.rifClienteNum,
+          o.data || pf.rifClienteData
+        ].filter(Boolean).join(' ');
+      } else {
+        rifTxt = String(pf.rifCliente || '').trim();
+        if (!rifTxt) {
+          rifTxt = [
+            pf.rifClienteTipo,
+            pf.rifClienteNum,
+            pf.rifClienteData
+          ].filter(Boolean).join(' ');
+        }
+      }
+
       const righe = Array.isArray(pf?.righe) ? pf.righe.map(r => ({
         ...r,
         UM: r.UM || r.um || 'PZ'
       })) : [];
 
-      setForm({ ...blank, ...(pf||{}), righe });
+      setForm({ ...blank, ...(pf||{}), rifCliente: rifTxt, righe });
       setEditingId(null);
       setShowForm(true);
     }catch{}
   },[]);
-
 
   // --- handlers form ---
   function onChange(ev){
@@ -9049,11 +9202,39 @@ React.useEffect(() => {
   }
 
   function updRiga(i, patch){
-    setForm(p => ({
-      ...p,
-      righe: (p.righe||[]).map((r,ix)=> ix===i ? { ...r, ...patch } : r)
-    }));
-  }
+  setForm(p => {
+    const arts = (window.lsGet ? window.lsGet('magArticoli', []) : []);
+    const righe = (p.righe||[]).map((r,ix)=>{
+      if(ix !== i) return r;
+
+      let next = { ...r, ...patch };
+
+      if (Object.prototype.hasOwnProperty.call(patch,'codice')) {
+        const cod = String(patch.codice||'').trim();
+        const a = arts.find(x => String(x.codice||x.id||'').trim() === cod) || null;
+
+        if (a) {
+          if (!next.descrizione) next.descrizione = a.descrizione || a.descr || '';
+          const um = String(next.UM||next.um||a.um||a.UM||'PZ').toUpperCase();
+          next.UM = um; next.um = um;
+          if (next.prezzo == null || next.prezzo === '' || Number(next.prezzo) === 0) {
+            next.prezzo = Number(a.prezzo ?? a.costo ?? 0) || 0;
+          }
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch,'UM') || Object.prototype.hasOwnProperty.call(patch,'um')) {
+        const um = String(next.UM||next.um||'PZ').toUpperCase();
+        next.UM = um; next.um = um;
+      }
+
+      return next;
+    });
+
+    return { ...p, righe };
+  });
+}
+
   function remRiga(i){
     setForm(p => ({ ...p, righe: (p.righe||[]).filter((_,ix)=> ix!==i) }));
   }
@@ -10024,7 +10205,7 @@ css += `
       <tbody>${rowsHTML}</tbody>
     </table>`;
 
-  const footer = `
+    const footer = `
   <div class="footer">
     <div class="grid">
       <div class="box">Vettore: <b>${vettore || '—'}</b></div>
@@ -10034,6 +10215,23 @@ css += `
       <div class="box">Peso netto: <b>${pesoNetto || '—'}</b></div>
       <div class="box">Peso lordo: <b>${pesoLordo || '—'}</b></div>
     </div>
+
+    <!-- FIRME come a video -->
+    <div class="grid firme" style="margin-top:6px; display:grid; grid-template-columns:repeat(3,1fr); gap:6px">
+      <div class="box" style="min-height:40px">
+        Firma vettore:
+        <div style="margin-top:6px; font-weight:700">${esc(ddt?.firmaVettore||'') || '—'}</div>
+      </div>
+      <div class="box" style="min-height:40px">
+        Firma conducente:
+        <div style="margin-top:6px; font-weight:700">${esc(ddt?.firmaConducente||'') || '—'}</div>
+      </div>
+      <div class="box" style="min-height:40px">
+        Firma destinatario:
+        <div style="margin-top:6px; font-weight:700">${esc(ddt?.firmaDestinatario||'') || '—'}</div>
+      </div>
+    </div>
+
     <div id="pagebox" class="pagebox">Pag. <span class="pageNum"></span></div>
   </div>
 `;
@@ -15435,12 +15633,13 @@ if (!localStorage.getItem('__ANIMA_FIX_QTA_ONCE__')) {
   window.prefillDDTFromCommessa = window.prefillDDTFromCommessa || function(comm){
     try{
       const lines = Array.isArray(comm?.righeArticolo) && comm.righeArticolo.length
-        ? comm.righeArticolo.map(r => ({
+        ? (comm.righeArticolo.map(r => ({
+            commessaRowId: String(r?.rowId || r?.rowID || ''),
             codice: String(r?.codice||''),
             descrizione: String(r?.descrizione||comm?.descrizione||''),
             um: String(r?.um||'PZ'),
             qta: Number(r?.qta||0) || 0,
-          }))
+          })))
         : [{
             codice: String(comm?.articoloCodice||''),
             descrizione: String(comm?.descrizione||''),
@@ -15494,25 +15693,30 @@ window.openDDTFromLastCommessa = window.openDDTFromLastCommessa || function(){
   }catch(e){ alert('Errore apertura DDT'); console.error(e); }
 };
 
-  // === Timbratura: scelta riga commessa (idempotente) =================
-window.chooseRigaForCommessa = window.chooseRigaForCommessa || function(comm){
+// === Commesse: assicura rowId stabile per righeArticolo (idempotente) ===
+window.ensureCommessaRowIds = window.ensureCommessaRowIds || function ensureCommessaRowIds(comm){
   try{
-    const righe = Array.isArray(comm?.righeArticolo) ? comm.righeArticolo : [];
-    if (!righe.length) return null;                   // nessuna riga → niente da scegliere
-    if (righe.length === 1) return { idx:0, ...righe[0] };
+    if (!comm || typeof comm!=='object') return comm;
+    const righe = Array.isArray(comm.righeArticolo) ? comm.righeArticolo : [];
+    if (!righe.length) return comm;
 
-    // prompt semplice e robusto (testo + indice 1..N)
-    const menu = righe.map((r,i)=> {
-      const cod = String(r?.codice||'').trim();
-      const ds  = String(r?.descrizione||'').trim();
-      const um  = String(r?.um||'PZ').trim();
-      const qt  = Number(r?.qta||0)||0;
-      return `${i+1}) ${cod ? cod+' — ' : ''}${ds} [${qt} ${um}]`;
-    }).join('\n');
-    const ans = prompt(`Questa commessa ha ${righe.length} righe.\nScegli su quale stai timbrando:\n\n${menu}\n\nScrivi un numero (1-${righe.length})`, '1');
-    const k = Math.max(1, Math.min(righe.length, Number(ans||1)|0)) - 1;
-    return { idx:k, ...righe[k] };
-  }catch(e){ console.warn('chooseRigaForCommessa error', e); return null; }
+    const base = String(comm.id || ('C?' + Date.now()));
+    let changed = false;
+
+    const nextRighe = righe.map((r, idx)=>{
+      const rowId = r && (r.rowId || r.rowID || r.rigaId);
+      if (rowId) return r;
+
+      changed = true;
+      const newId = `${base}#R${idx+1}-${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`;
+      return { ...r, rowId: newId };
+    });
+
+    return changed ? { ...comm, righeArticolo: nextRighe, updatedAt: new Date().toISOString() } : comm;
+  }catch(e){
+    console.warn('ensureCommessaRowIds', e);
+    return comm;
+  }
 };
 
 // utility: trova commessa per id
