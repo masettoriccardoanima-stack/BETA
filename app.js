@@ -1728,6 +1728,84 @@ window.hasRole = window.hasRole || function (role) {
   }catch{}
 })();
 
+// ============ Patch: intercetta accessi localStorage diretti in BETA ============
+(function(){
+  if (window.__ANIMA_LS_PATCHED__) return;
+  window.__ANIMA_LS_PATCHED__ = true;
+
+  function isBetaEnv(){
+    try{
+      const s = JSON.parse(localStorage.getItem('appSettings')||'{}') || {};
+      const env = String(s.cloudEnv || s.supabaseEnv || '').toLowerCase();
+      if (env === 'beta') return true;
+      return String(window.__APP_CHANNEL__||'').toLowerCase() === 'beta';
+    }catch{
+      return String(window.__APP_CHANNEL__||'').toLowerCase() === 'beta';
+    }
+  }
+
+  if (!isBetaEnv()) return;
+
+  const NS = 'BETA:';
+  const TARGET_KEYS = new Set([
+    // dati principali
+    'clientiRows',
+    'fornitoriRows',
+    'magArticoli',
+    'magazzinoArticoli',
+    'commesseRows',
+    'ddtRows',
+    'fattureRows',
+    'ordiniFornitoriRows',
+    'timbratureRows',
+    'magMovimenti',
+    // impostazioni/contatori/UI
+    'appSettings',
+    'counters',
+    'oreRows',
+    'lastRoute',
+    'sidebarOpen',
+    'activeTab',
+    // prefill / QR / varie
+    'prefillDDT',
+    'prefillFattura',
+    'qrJob',
+    // flag interni
+    'ORE_CLOUD_IMPORTED_IDS',
+    '__ANIMA_FIX_QTA_ONCE__'
+  ]);
+
+  const _get = localStorage.getItem.bind(localStorage);
+  const _set = localStorage.setItem.bind(localStorage);
+  const _rem = localStorage.removeItem.bind(localStorage);
+
+  localStorage.getItem = function(k){
+    if (TARGET_KEYS.has(k)){
+      const vN = _get(NS + k);
+      if (vN != null) return vN;
+
+      // fallback one-shot dalla chiave normale
+      const v = _get(k);
+      if (v != null){
+        try { _set(NS + k, v); } catch {}
+      }
+      return v;
+    }
+    return _get(k);
+  };
+
+  localStorage.setItem = function(k, v){
+    if (TARGET_KEYS.has(k)) return _set(NS + k, v);
+    return _set(k, v);
+  };
+
+  localStorage.removeItem = function(k){
+    if (TARGET_KEYS.has(k)) return _rem(NS + k);
+    return _rem(k);
+  };
+
+  try { console.log('[LS] Patch direct localStorage → BETA:* attiva'); } catch {}
+})();
 
 /* ================== MAGAZZINO: movimenti & giacenze (helper generici) ================== */
 (function(){
