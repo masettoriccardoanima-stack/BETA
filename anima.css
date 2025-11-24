@@ -407,41 +407,63 @@ input, select, textarea{ padding: 8px 10px; }
   left: auto;
   z-index: 40;
 
-  padding: 8px 10px;
+  padding: 6px 8px;
   border-radius: 10px;
   background: rgba(15,23,42,.95);
   border: 1px solid rgba(148,163,184,.5);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  flex-wrap: wrap;
+
   font-size: 12px;
   color: #e5e7eb;
+
+  max-width: min(320px, calc(100vw - 32px));
 }
 
+/* contenuto testuale della sessionbar */
 .sessionbar-info{
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  max-width: 200px;     /* evita che le info allarghino il box */
+  line-height: 1.2;
 }
+
+/* Email secondaria in grigio: la nascondiamo */
+.sessionbar-mail{
+  display: none;
+}
+
+/* ====== SAFE AREA sotto per evitare sormonto con la sessionbar ====== */
+:root{
+  --sessionbar-safe-bottom: 72px; /* altezza box + margine */
+}
+
+/* spazio extra solo sul wrapper dei contenuti (evita doppi padding globali) */
+body .content{
+  padding-bottom: calc(var(--sessionbar-safe-bottom) + 16px) !important;
+}
+
+/* --- Sessionbar: tronca le righe lunghe e limita larghezza box --- */
+.sessionbar-info > *{
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* evita che il box superi una larghezza ragionevole */
+
 .sessionbar-role{
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: .06em;
   font-size: 11px;
   color: #f97316; /* arancio ANIMA */
-}
-.sessionbar-mail{
-  max-width: 200px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  opacity: .9;
-}
-
-.sessionbar .btn-logout{
-  padding: 4px 8px;
-  font-size: 11px;
 }
 
 .sessionbar .btn-login{
@@ -559,6 +581,118 @@ body.sidebar-collapsed .content { padding-left: 16px; }
 body:has(aside.sidebar) aside.card { display: none !important; }
 /* fallback senza :has — se la legacy è dopo la nuova */
 aside.sidebar + aside.card, aside.sidebar ~ aside.card { display: none !important; }
+
+.table tr.totrow td{
+  border-top:2px solid #999;
+  background:#fafafa;
+}
+/* ===== CANONICO FINALE: TABELLE & AZIONI (vince sui duplicati sopra) ===== */
+
+/* Le card non devono tagliare menu o bottoni */
+.card{ overflow: visible !important; }
+
+/* Tabella fluida e leggibile */
+.table{
+  width:100% !important;
+  table-layout:auto !important;
+  border-collapse:collapse !important;
+}
+
+/* Celle: wrapping consentito, niente ritagli strani */
+.table th,
+.table td{
+  padding:8px 10px !important;
+  vertical-align:middle !important;
+  white-space:normal !important;
+  overflow:visible !important;
+  text-overflow:clip !important;
+  position:relative !important; /* serve ai dropdown */
+}
+
+/* Colonna azioni: sempre usabile, va a capo */
+.table tr > td:last-child{
+  display:flex !important;
+  flex-wrap:wrap !important;
+  gap:6px !important;
+  width:auto !important;
+}
+
+/* Bottoni compatti coerenti */
+.table .btn{
+  padding:6px 10px !important;
+  font-size:12px !important;
+  line-height:1.1 !important;
+  border-radius:10px !important;
+  white-space:nowrap !important;
+}
+
+/* Dropdown sopra a tutto */
+.dropdown{ position:relative !important; }
+.dropdown-menu{
+  position:absolute !important;
+  right:0 !important;
+  top:calc(100% + 6px) !important;
+  min-width:180px !important;
+  background:#fff !important;
+  border:1px solid #e5e7eb !important;
+  border-radius:10px !important;
+  padding:8px !important;
+  box-shadow:0 12px 30px rgba(0,0,0,.12) !important;
+  z-index:99999 !important;
+}
+
+/* ===== CANONICO FINALE: SIDEBAR & LAYOUT (vince sui duplicati sopra) ===== */
+
+/* Variabile unica larghezza sidebar */
+:root{
+  --sidebar-w: 260px !important;
+}
+
+/* Desktop: sidebar fissa + content spostato a destra */
+@media (min-width: 1025px){
+  .layout{
+    display:flex !important;
+    min-height:100vh !important;
+  }
+
+  .sidebar{
+    width: var(--sidebar-w) !important;
+    background:#111827 !important;
+    color:#fff !important;
+    padding:16px !important;
+
+    position: fixed !important;
+    top:0 !important; left:0 !important; bottom:0 !important;
+    overflow-y:auto !important;
+    z-index:1000 !important;
+  }
+
+  .content,
+  .app-layout .content,
+  body .content{
+    flex:1 !important;
+    display:flex !important;
+    flex-direction:column !important;
+
+    margin-left: calc(var(--sidebar-w) + 8px) !important;
+    padding-right: calc(var(--sessionbar-safe) + 16px) !important;
+    min-width:0 !important;          /* evita tagli a destra */
+    box-sizing:border-box !important;
+  }
+}
+
+/* Mobile/Tablet: sidebar nascosta, uso drawer */
+@media (max-width: 1024px){
+  .sidebar{ display:none !important; }
+
+  .content,
+  .app-layout .content,
+  body .content{
+    margin-left:0 !important;
+  }
+
+  #anima-hamburger{ display:block !important; }
+}
 
 
 
