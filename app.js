@@ -3019,9 +3019,9 @@ window.createDDTRapidoFromCommessa = function(c){
 };
 
 function producedPieces(c, oreRows){
-  const tot = Math.max(1, Number(c?.qtaPezzi || 1));
+  if (!c) return 0;
 
-  // helper: riconosce fasi "una tantum" o "preparazione attività"
+  // helper: riconosce fasi "una tantum" (o preparazione attività)
   const deaccent = s => String(s||'')
     .normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().trim();
   const isOncePhase = (f) => {
@@ -3030,14 +3030,47 @@ function producedPieces(c, oreRows){
     return /(^|[^a-z])preparazione\s+attivita([^a-z]|$)/.test(name);
   };
 
-  // eventi timbrature (fonte verità)
-  const rows = Array.isArray(oreRows)
-    ? oreRows
-    : (typeof window.lsGet === 'function' ? window.lsGet('oreRows', []) : []);
-  const jobId = String(c?.id || '');
-  const ev = (Array.isArray(rows)?rows:[]).filter(o => String(o.commessaId||'') === jobId);
+  const righe = Array.isArray(c.righeArticolo) ? c.righeArticolo : [];
+  const hasRowFasi = righe.some(r => Array.isArray(r?.fasi) && r.fasi.length);
 
-  // se non ho eventi, fallback legacy (compatibilità)
+  // === NUOVO: se ho fasi per-riga sommo il min per riga
+  if (righe.length && hasRowFasi){
+    let sum = 0;
+
+    for (const r of righe){
+      const totRiga = Math.max(0, Number(r?.qta || 0));
+      if (totRiga <= 0) continue;
+
+      const fasiR = Array.isArray(r.fasi) ? r.fasi : [];
+      const quant = fasiR
+        .filter(f => !isOncePhase(f))
+        .map(f => Math.max(0, Number(f?.qtaProdotta || 0)));
+
+      let prodRiga = 0;
+      if (quant.length){
+        prodRiga = Math.min(...quant);
+      } else {
+        // fallback compat (riga senza fasi quantitative)
+        prodRiga = Math.max(0, Number(r?.qtaProdotta || 0));
+      }
+
+      sum += Math.max(0, Math.min(totRiga, prodRiga));
+    }
+
+    // clamp a totale atteso (preferisco somma righe, fallback qtaPezzi)
+    const totCommLegacy = Math.max(1, Number(c?.qtaPezzi || 1));
+    const totRighe = righe.reduce((S,r)=> S + Math.max(0, Number(r?.qta||0)), 0);
+    const totAtteso = totRighe > 0 ? totRighe : totCommLegacy;
+
+    return Math.max(0, Math.min(totAtteso, sum));
+  }
+
+  // === LEGACY: vecchia logica globale (eventi/oreRows + fasi globali)
+  const tot = Math.max(1, Number(c?.qtaPezzi || 1));
+
+  const ev = (Array.isArray(oreRows) ? oreRows : [])
+    .filter(o => String(o?.commessaId||'') === String(c?.id||''));
+
   if (!ev.length){
     const fasiLegacy = Array.isArray(c?.fasi) ? c.fasi : [];
     if (!fasiLegacy.length) return Math.max(0, Math.min(tot, Number(c?.qtaProdotta || 0) || 0));
@@ -3054,11 +3087,10 @@ function producedPieces(c, oreRows){
 
   const fasi = Array.isArray(c?.fasi) ? c.fasi : [];
 
-  // modello A: pezzi prodotti = min tra fasi quantitative (derivato dagli eventi)
   if (fasi.length){
     const perFaseQuant = [];
     fasi.forEach((f, idx) => {
-      if (isOncePhase(f)) return; // skip preparazione/unaTantum
+      if (isOncePhase(f)) return;
       const s = ev
         .filter(o => Number(o.faseIdx) === Number(idx))
         .reduce((acc, o) => acc + Math.max(0, Number(o.qtaPezzi||0)), 0);
@@ -3066,18 +3098,16 @@ function producedPieces(c, oreRows){
     });
 
     if (!perFaseQuant.length){
-      // tutte fasi once → fallback a somma eventi
-      const sum = ev.reduce((acc, o) => acc + Math.max(0, Number(o.qtaPezzi||0)), 0);
-      return Math.max(0, Math.min(tot, sum));
+      const sumEv = ev.reduce((acc, o) => acc + Math.max(0, Number(o.qtaPezzi||0)), 0);
+      return Math.max(0, Math.min(tot, sumEv));
     }
 
     const min = Math.min(...perFaseQuant);
     return Math.max(0, Math.min(tot, min));
   }
 
-  // senza fasi → totale pezzi = somma eventi commessa
-  const sum = ev.reduce((acc, o) => acc + Math.max(0, Number(o.qtaPezzi||0)), 0);
-  return Math.max(0, Math.min(tot, sum));
+  const sumEv = ev.reduce((acc, o) => acc + Math.max(0, Number(o.qtaPezzi||0)), 0);
+  return Math.max(0, Math.min(tot, sumEv));
 }
 
 function residualPieces(c, oreRows){
@@ -4082,28 +4112,24 @@ global.requireLogin = async function () {
     const label = formatUserLabel(u);
 
     return e('div', { className:"sessionbar", id:"anima-session" },
-      u
-        ? e(React.Fragment,null,
-            e('div', { className:"sessionbar-info" },
-              e('div', { className:"sessionbar-role" }, label || 'Utente'),
-              (u.email || u.username)
-                ? e('div', { className:"sessionbar-mail" }, u.email || u.username)
-                : null
+  u
+    ? e(React.Fragment,null,
+                    e('div', { className:"sessionbar-info" },
+              e('div', { className:"sessionbar-role" }, label || 'Utente')
             ),
-            e('button', {
-              className:"btn btn-outline btn-logout",
-              type:"button",
-              onClick:()=> window.logout && window.logout()
-            }, "Logout")
-          )
-        : e('button', {
-            className:"btn btn-outline btn-login",
-            type:"button",
-            onClick:()=>{ location.hash = '#/login'; }
-          }, "Login")
-    );
+        e('button', {
+          className:"btn btn-outline btn-logout",
+          type:"button",
+          onClick:()=> window.logout && window.logout()
+        }, "Logout")
+      )
+    : e('button', {
+        className:"btn btn-outline btn-login",
+        type:"button",
+        onClick:()=>{ location.hash = '#/login'; }
+      }, "Login")
+  );
   }
-
   // mount: prova a metterlo nella sidebar, in fondo al menu
   let host = document.getElementById('anima-session');
   if (!host) {
@@ -4452,8 +4478,8 @@ function DashboardView(){
   };
   const todayISO = () => new Date().toISOString().slice(0,10);
 
-  // Modello A: pezzi prodotti = min(qtaProdotta delle fasi)
-  function producedPieces(c){
+    // Modello A legacy (commessa intera): min(qtaProdotta delle fasi globali)
+  function producedPiecesLegacy(c){
     const tot = Math.max(1, Number(c?.qtaPezzi||1));
     const fasi = Array.isArray(c?.fasi) ? c.fasi : [];
     if (!fasi.length) return Math.max(0, Math.min(tot, Number(c?.qtaProdotta||0) || 0));
@@ -4461,6 +4487,26 @@ function DashboardView(){
     if (!arr.length) return 0;
     const min = Math.min(...arr);
     return Math.max(0, Math.min(tot, min));
+  }
+
+  // Per-riga: min(qtaProdotta delle fasi della riga)
+  function producedPiecesRow(r, totFallback){
+    const tot = Math.max(1, Number(r?.qta || totFallback || 1));
+    const fasiR = Array.isArray(r?.fasi) ? r.fasi : [];
+    if (!fasiR.length) return 0;
+    const arr = fasiR.map(f => Math.max(0, Number(f?.qtaProdotta||0)));
+    if (!arr.length) return 0;
+    const min = Math.min(...arr);
+    return Math.max(0, Math.min(tot, min));
+  }
+
+  // Effettivo mostrato in UI: se ho riga selezionata uso per-riga, altrimenti legacy
+  function producedPiecesUI(c, rigaIdxNum){
+    const totComm = Math.max(1, Number(c?.qtaPezzi||1));
+    if (Number.isFinite(rigaIdxNum) && Array.isArray(c?.righeArticolo) && c.righeArticolo[rigaIdxNum]){
+      return producedPiecesRow(c.righeArticolo[rigaIdxNum], totComm);
+    }
+    return producedPiecesLegacy(c);
   }
 
   // Ore pianificate
@@ -5910,7 +5956,7 @@ function chiediEtichetteECStampa(commessa) {
     if (k === 'commesseRows') { prev = lsGet('commesseRows', []); }
 
     // normalizza rowId (se helper disponibile)
-    let vNorm = v;
+        let vNorm = v;
     if (k === 'commesseRows' && Array.isArray(v)) {
       try{
         const fnIds  = window.ensureCommessaRowIds;
@@ -6338,10 +6384,33 @@ function duplicaCommessa(src){
 
     const copy = JSON.parse(JSON.stringify(src));
     const newId = (typeof window.ensureUniqueCommessaId === 'function') ? window.ensureUniqueCommessaId(nid) : nid;
+
     copy.id = newId;
+
+    // reset produzione legacy globale
     copy.qtaProdotta = 0;
     delete copy.__completedAt;
-    if (Array.isArray(copy.fasi)) copy.fasi = copy.fasi.map(f => ({ ...f, qtaProdotta: 0 }));
+    if (Array.isArray(copy.fasi)) {
+      copy.fasi = copy.fasi.map(f => ({ ...f, qtaProdotta: 0 }));
+    }
+
+    // ✅ reset produzione PER-RIGA (questa era la causa del popup colli)
+    if (Array.isArray(copy.righeArticolo)) {
+      copy.righeArticolo = copy.righeArticolo.map(r => ({
+        ...r,
+        qtaProdotta: 0,
+        fasi: Array.isArray(r.fasi)
+          ? r.fasi.map(f => ({ ...f, qtaProdotta: 0 }))
+          : r.fasi
+      }));
+    }
+
+    // reset flags auto-scarico/etichette
+    delete copy.scaricoDone;
+    delete copy.labelsPrinted;
+    delete copy.__scaricoDoneAt;
+    delete copy.__labelsPrintedAt;
+
     copy.createdAt = new Date().toISOString();
     copy.updatedAt = new Date().toISOString();
 
@@ -13001,8 +13070,7 @@ const _todayISO = () => new Date().toISOString().slice(0,10);
 function _s(v){ return String(v||'').replace(/[<>&]/g, ch => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[ch])); }
 
 function isCommessaCompleta(c){
-  const tot = Math.max(1, Number(c?.qtaPezzi||1));
-  const prod = Number(c?.qtaProdotta||0);
+  if (!c) return false;
 
   const deaccent = s => String(s||'')
     .normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().trim();
@@ -13011,6 +13079,36 @@ function isCommessaCompleta(c){
     const name = deaccent(f?.lav||'');
     return /(^|[^a-z])preparazione\s+attivita([^a-z]|$)/.test(name);
   };
+
+  const righe = Array.isArray(c.righeArticolo) ? c.righeArticolo : [];
+  const hasRowFasi = righe.some(r => Array.isArray(r?.fasi) && r.fasi.length);
+
+  // === NUOVO: commessa completa se tutte le righe sono complete
+  if (righe.length && hasRowFasi){
+    for (const r of righe){
+      const totRiga = Math.max(0, Number(r?.qta || 0));
+      if (totRiga <= 0) continue; // riga vuota/non quantitativa -> ignoro
+
+      const fasiR = Array.isArray(r.fasi) ? r.fasi : [];
+      const quant = fasiR
+        .filter(f => !isOncePhase(f))
+        .map(f => Math.max(0, Number(f?.qtaProdotta || 0)));
+
+      let prodRiga = 0;
+      if (quant.length){
+        prodRiga = Math.min(...quant);
+      } else {
+        prodRiga = Math.max(0, Number(r?.qtaProdotta || 0));
+      }
+
+      if (prodRiga < totRiga) return false;
+    }
+    return true;
+  }
+
+  // === LEGACY: vecchia logica globale
+  const tot = Math.max(1, Number(c?.qtaPezzi||1));
+  const prod = Number(c?.qtaProdotta||0);
 
   const fasiOk = Array.isArray(c?.fasi)
     ? c.fasi.filter(f => !isOncePhase(f)).every(f => Number(f?.qtaProdotta||0) >= tot)
@@ -13829,7 +13927,12 @@ function _saveImportedCloudIds(set){
                 )
               ),
               e('tbody', null,
-                rowsFiltrateLocal.map((r,i)=>{
+                (rowsFiltrateLocal.slice().sort((a,b)=>{
+                  const ta = Date.parse(a.__createdAt||a.created_at||a.data||a.date||0)||0;
+                  const tb = Date.parse(b.__createdAt||b.created_at||b.data||b.date||0)||0;
+                  if (tb!==ta) return tb-ta;
+                  return String(b.id||'').localeCompare(String(a.id||''));
+                })).map((r,i)=>{
                   const c = commesse.find(x=>x.id===r.commessaId);
                   const faseLab = (function(){
                     if (r.faseIdx==null) return '—';
@@ -13873,6 +13976,12 @@ window.__rpt_groupBy = window.__rpt_groupBy || function(oreRows, { byRiga=false,
       return h*60+mm;
     };
 
+    const tsOf = (r) => {
+      return (
+        Date.parse(r.__createdAt || r.created_at || r.data || r.date || 0) || 0
+      );
+    };
+
     for (const r of rows) {
       const key = byRiga
         ? `${r.commessaId}|${r.rigaIdx ?? ''}|${r.rigaCodice ?? ''}`
@@ -13886,26 +13995,40 @@ window.__rpt_groupBy = window.__rpt_groupBy || function(oreRows, { byRiga=false,
         rigaUM: r.rigaUM || '',
         pezzi: 0,
         oreMin: 0,
-        oreHHMM: '0:00'
+        oreHHMM: '0:00',
+        latestAt: 0
       };
 
       const addMin = (Number(r.oreMin) || 0) || toMin(r.oreHHMM);
       cur.pezzi += Math.max(0, Number(r.qtaPezzi||r.pezzi||0));
       cur.oreMin += addMin;
-      // aggiorna HH:MM
+
       const t = Math.max(0, Math.round(cur.oreMin));
       const h = Math.floor(t/60), m = t%60;
       cur.oreHHMM = `${h}:${String(m).padStart(2,'0')}`;
 
+      const ts = tsOf(r);
+      if (ts > cur.latestAt) cur.latestAt = ts;
+
       map.set(key, cur);
     }
-    return Array.from(map.values());
+
+    return Array.from(map.values())
+      .sort((a,b)=>{
+        // più nuovo sopra
+        if ((b.latestAt||0) !== (a.latestAt||0)) return (b.latestAt||0)-(a.latestAt||0);
+        // fallback: commessa desc
+        if (String(b.commessaId||'') !== String(a.commessaId||'')) {
+          return String(b.commessaId||'').localeCompare(String(a.commessaId||''));
+        }
+        // fallback: riga asc
+        return String(a.rigaIdx??'').localeCompare(String(b.rigaIdx??''));
+      });
   } catch(e) {
     console.warn('__rpt_groupBy error', e);
     return [];
   }
 };
-
 
 /* ================== REPORT TEMPI (PIANIFICATE vs EFFETTIVE + ORE PER FASE) ================== */
 // [RPT] Helper aggregazione per riga articolo (idempotente)
@@ -13981,11 +14104,15 @@ window.__rpt_groupBy = function(oreRowsAll, { byRiga=false, onlyCommessaId=null 
     return h*60+mm;
   };
 
+  // timestamp robusto per ordinamento "più nuovo sopra"
+  const tsOf = (r) =>
+    Date.parse(r.__createdAt || r.created_at || r.data || r.date || 0) || 0;
+
   const keyOf = (r) => {
     const cid = String(r?.commessaId||'');
-    if (!byRiga) return `C:${cid}`;
+    if (!byRiga) return `C:${cid}`; // report per commessa
     const idx = (r?.rigaIdx==='' || r?.rigaIdx==null) ? 'ALL' : String(r.rigaIdx|0);
-    return `C:${cid}|R:${idx}`;
+    return `C:${cid}|R:${idx}`; // report per riga
   };
 
   const map = new Map();
@@ -13998,10 +14125,21 @@ window.__rpt_groupBy = function(oreRowsAll, { byRiga=false, onlyCommessaId=null 
       rigaDescrizione: r?.rigaDescrizione || '',
       rigaUM: r?.rigaUM || '',
       pezzi: 0,
-      oreMin: 0
+      oreMin: 0,
+      latestAt: 0
     };
+
     cur.pezzi += Math.max(0, Number(r?.qtaPezzi||0));
     cur.oreMin += (Number(r?.oreMin)||toMin(r?.oreHHMM)||0);
+
+    const t = tsOf(r);
+    if (t > cur.latestAt) cur.latestAt = t;
+
+    // metadati riga se arrivano dalle timbrature
+    if (r?.rigaCodice && !cur.rigaCodice) cur.rigaCodice = String(r.rigaCodice);
+    if (r?.rigaDescrizione && !cur.rigaDescrizione) cur.rigaDescrizione = String(r.rigaDescrizione);
+    if (r?.rigaUM && !cur.rigaUM) cur.rigaUM = String(r.rigaUM);
+
     map.set(k, cur);
   }
 
@@ -14011,6 +14149,7 @@ window.__rpt_groupBy = function(oreRowsAll, { byRiga=false, onlyCommessaId=null 
     const c = commById.get(v.commessaId) || {};
     const ore = Math.floor(v.oreMin/60);
     const min = v.oreMin % 60;
+
     out.push({
       commessaId: v.commessaId,
       cliente: c?.cliente || '',
@@ -14018,15 +14157,25 @@ window.__rpt_groupBy = function(oreRowsAll, { byRiga=false, onlyCommessaId=null 
       rigaIdx: v.rigaIdx,
       rigaCodice: v.rigaCodice,
       rigaDescrizione: v.rigaDescrizione,
-      rigaUM: v.rigaUM || (Array.isArray(c?.righeArticolo) && typeof v.rigaIdx==='number' ? (c.righeArticolo[v.rigaIdx]?.um || '') : ''),
+      rigaUM: v.rigaUM || (Array.isArray(c?.righeArticolo) && typeof v.rigaIdx==='number'
+        ? (c.righeArticolo[v.rigaIdx]?.um || '')
+        : ''),
       pezzi: v.pezzi,
       oreMin: v.oreMin,
-      oreHHMM: `${ore}:${String(min).padStart(2,'0')}`
+      oreHHMM: `${ore}:${String(min).padStart(2,'0')}`,
+      latestAt: v.latestAt
     });
   }
 
-  // Ordina: commessa → riga
-  out.sort((a,b) => (String(a.commessaId).localeCompare(String(b.commessaId)) || ((a.rigaIdx??99) - (b.rigaIdx??99))));
+  // Ordina: più nuovo sopra, poi commessa desc, poi riga asc
+  out.sort((a,b)=>{
+    if ((b.latestAt||0) !== (a.latestAt||0)) return (b.latestAt||0) - (a.latestAt||0);
+    if (String(b.commessaId||'') !== String(a.commessaId||'')) {
+      return String(b.commessaId||'').localeCompare(String(a.commessaId||''));
+    }
+    return (a.rigaIdx??99) - (b.rigaIdx??99);
+  });
+
   return out;
 };
 
@@ -14092,19 +14241,46 @@ window.__rpt_groupBy = window.__rpt_groupBy || function __rpt_groupBy(oreRows, o
 };
 
 function ReportTempiView({ query = '' }) {
-  const e = React.createElement;
+    const e = React.createElement;
   // == Raggruppo per riga articolo ==
   const [groupByRiga, setGroupByRiga] = React.useState(false);
   const [commessaFilter, setCommessaFilter] = React.useState('');
+
   const oreRowsAll = React.useMemo(() => {
     try { return JSON.parse(localStorage.getItem('oreRows') || '[]'); } catch { return []; }
   }, []);
+
   const aggRows = React.useMemo(() => (
-    window.__rpt_groupBy(oreRowsAll, { byRiga: groupByRiga, onlyCommessaId: commessaFilter || null })
+    window.__rpt_groupBy(oreRowsAll, {
+      byRiga: groupByRiga,
+      onlyCommessaId: commessaFilter || null
+    })
   ), [oreRowsAll, groupByRiga, commessaFilter]);
+
   const commesseIds = React.useMemo(() => {
     return Array.from(new Set((oreRowsAll||[]).map(r => r?.commessaId).filter(Boolean))).sort();
   }, [oreRowsAll]);
+
+  // filtro per codice articolo (attivo solo quando groupByRiga)
+  const [codiceFilter, setCodiceFilter] = React.useState('');
+
+  // lista codici unici dalle timbrature
+  const codiciList = React.useMemo(() => {
+    const set = new Set();
+    (oreRowsAll||[]).forEach(r => {
+      const c = String(r?.rigaCodice || '').trim();
+      if (c) set.add(c);
+    });
+    return Array.from(set).sort((a,b)=>a.localeCompare(b));
+  }, [oreRowsAll]);
+
+  // righe aggregate filtrate per codice
+  const aggRowsFiltered = React.useMemo(() => {
+    if (!codiceFilter) return aggRows;
+    return (aggRows||[]).filter(r =>
+      String(r?.rigaCodice || '').trim() === String(codiceFilter).trim()
+    );
+  }, [aggRows, codiceFilter]);
 
 function isGasNote(t){ return /cambio\s*bombola\s*gas/i.test(String(t||'')); }
 
@@ -14130,6 +14306,34 @@ function isGasNote(t){ return /cambio\s*bombola\s*gas/i.test(String(t||'')); }
   const oreRows  = React.useMemo(()=>{ try{ return JSON.parse(localStorage.getItem('oreRows')||'[]'); }catch{ return []; } },[]);
 
   // ---- Report 1: Pianificate vs Effettive (fix + % scostamento) ----
+  // Helper robusto: minuti pianificati di una fase (supporta campi legacy e per-riga)
+function plannedMinsFromFase(f){
+  if (!f || typeof f !== 'object') return 0;
+
+  // numerici diretti
+  const n =
+    (typeof f.oreMin === 'number' && isFinite(f.oreMin)) ? f.oreMin :
+    (typeof f.minuti === 'number' && isFinite(f.minuti)) ? f.minuti :
+    (typeof f.min === 'number' && isFinite(f.min)) ? f.min :
+    (typeof f.orePrevMin === 'number' && isFinite(f.orePrevMin)) ? f.orePrevMin :
+    null;
+
+  if (n != null) return Math.max(0, Math.round(n));
+
+  // stringhe HH:MM (ordine per compatibilità)
+  const hhmm =
+    f.oreHHMM ||
+    f.hhmm ||
+    f.orePrevHHMM ||
+    f.orePrevistaHHMM ||
+    f.orePrev ||
+    f.durataHHMM ||
+    '';
+
+  return Math.max(0, Math.round(toMin(hhmm || '0')));
+}
+window.plannedMinsFromFase = plannedMinsFromFase; // debug console
+
 function plannedMinPerPiece(c){
   const fasi = Array.isArray(c.fasi) ? c.fasi : [];
   if (fasi.length === 0){
@@ -14140,33 +14344,192 @@ function plannedMinPerPiece(c){
   let perPiece = 0;
   let unaTantum = 0;
   for (const f of fasi){
-    const min = (typeof f.oreMin==='number' ? f.oreMin : toMin(f.oreHHMM||'0')) || 0;
+      const min = plannedMinsFromFase(f);
     if (f.unaTantum || f.once) unaTantum += min; else perPiece += min;
   }
   // unaTantum NON è per pezzo; qui ritorniamo solo la parte per pezzo
   return Math.max(0, Math.round(perPiece));
 }
-function plannedMinTotal(c){
-  const fasi = Array.isArray(c.fasi) ? c.fasi : [];
-  const q = Math.max(1, Number(c.qtaPezzi||1));
-  if (fasi.length === 0){
-    // senza fasi: oreMin/oreHHMM * quantità
+// === R3: pianificato per singola riga articolo (usa fasi per-riga se presenti) ===
+function plannedMinPerPieceRow(c, row){
+    const rowFasi  = (row && Array.isArray(row.fasi) && row.fasi.length) ? row.fasi : [];
+  const commFasi = Array.isArray(c?.fasi) ? c.fasi : [];
+
+  // override per-riga SOLO se contiene tempi pianificati
+  const rowHasPlanned = rowFasi.some(f => plannedMinsFromFase(f) > 0);
+  const fasiEff = rowHasPlanned ? rowFasi : commFasi;
+
+    if (fasiEff.length === 0){
     const perPiece = (typeof c.oreMin==='number' ? c.oreMin : toMin(c.oreHHMM||'0')) || 0;
+    return Math.max(0, Math.round(perPiece));
+  }
+
+  let perPiece = 0;
+    for (const f of fasiEff){
+    const min = plannedMinsFromFase(f);
+    if (!(f.unaTantum || f.once)) perPiece += min;
+  }
+  return Math.max(0, Math.round(perPiece));
+}
+
+// === Pianificato TOTALE per commessa: se ho fasi per-riga le sommo ===
+function plannedMinTotalCommessaSmart(c){
+  const righe = Array.isArray(c?.righeArticolo) ? c.righeArticolo : [];
+    // uso fasi per-riga SOLO se contengono tempi pianificati reali
+  const hasRowFasiPlanned = righe.some(r =>
+    Array.isArray(r?.fasi) &&
+    r.fasi.some(f => plannedMinsFromFase(f) > 0)
+  );
+
+  if (righe.length && hasRowFasiPlanned){
+    return righe.reduce((s,row)=> s + plannedMinTotalRow(c, row), 0);
+  }
+
+
+  // fallback legacy su fasi globali
+  const fasi = Array.isArray(c?.fasi) ? c.fasi : [];
+  const q = Math.max(1, Number(c?.qtaPezzi||1));
+
+  if (fasi.length === 0){
+    const perPiece = plannedMinPerPiece(c);
     return Math.max(0, Math.round(perPiece * q));
   }
+
   let perPiece = 0, unaTantum = 0;
   for (const f of fasi){
-    const min = (typeof f.oreMin==='number' ? f.oreMin : toMin(f.oreHHMM||'0')) || 0;
-    if (f.unaTantum || f.once) unaTantum += min; else perPiece += min;
+       const min = plannedMinsFromFase(f);
+    if (f.unaTantum || f.once) unaTantum += min;
+    else perPiece += min;
   }
   return Math.max(0, Math.round(unaTantum + perPiece * q));
 }
+
+// === Pianificato per singola riga articolo ===
+function plannedMinTotalRow(c, row){
+  const qRow = Math.max(1, Number(row?.qta || row?.qtaPezzi || 1));
+
+  const rowFasi = (row && Array.isArray(row.fasi) && row.fasi.length) ? row.fasi : [];
+  const commFasi = Array.isArray(c?.fasi) ? c.fasi : [];
+
+  // override per-riga SOLO se contiene tempi
+  const rowHasPlanned = rowFasi.some(f => plannedMinsFromFase(f) > 0);
+  const fasiEff = rowHasPlanned ? rowFasi : commFasi;
+
+  if (fasiEff.length === 0){
+    const perPiece = plannedMinPerPiece(c);
+    return Math.max(0, Math.round(perPiece * qRow));
+  }
+
+  let perPiece = 0, unaTantum = 0;
+  for (const f of fasiEff){
+    const min = plannedMinsFromFase(f);
+    if (f.unaTantum || f.once) unaTantum += min;
+    else perPiece += min;
+  }
+
+  return Math.max(0, Math.round(unaTantum + perPiece * qRow));
+}
+
+// === R3: totale selezione (commessa / codice) ===
+const selectionTotals = React.useMemo(()=>{
+  try{
+    const commFilter = String(commessaFilter||'').trim();
+    const codFilter  = String(codiceFilter||'').trim();
+
+    // effettive: come Report1 -> solo fasi vere (faseIdx != null)
+    const effMin = (oreRowsAll||[])
+      .filter(r=>{
+        if (commFilter && String(r?.commessaId||'') !== commFilter) return false;
+        if (codFilter){
+          const cod = String(r?.rigaCodice || r?.codice || '').trim();
+          if (cod !== codFilter) return false;
+        }
+        if (r?.faseIdx == null || r?.faseIdx === '') return false;
+        return true;
+      })
+      .reduce((s,r)=> s + (Number(r.oreMin)||toMin(r.oreHHMM)||0), 0);
+
+    let pianMin = 0;
+
+    // per-pezzo (media pesata sui pezzi selezionati)
+    let perPieceNumer = 0;
+    let piecesSel = 0;
+
+    const commesseSel = (commesse||[])
+      .filter(c => !commFilter || String(c.id) === commFilter);
+
+    for (const c of commesseSel){
+      const righe = Array.isArray(c?.righeArticolo) ? c.righeArticolo : [];
+
+      if (groupByRiga){
+        const righeSel = codFilter
+          ? righe.filter(row=>{
+              const cod = String(row?.codice || row?.articoloCodice || '').trim();
+              return cod === codFilter;
+            })
+          : righe;
+
+        for (const row of righeSel){
+          const qRow = Math.max(0, Number(row?.qta || row?.qtaPezzi || 0));
+          if (!qRow) continue;
+
+          // totale pianificato riga (include una-tantum dove presenti)
+          pianMin += plannedMinTotalRow(c, row);
+
+          // per-pezzo vero (esclude una-tantum)
+          const perPiece = plannedMinPerPieceRow(c, row);
+          perPieceNumer += perPiece * qRow;
+          piecesSel += qRow;
+        }
+
+      } else {
+        // commessa intera
+        pianMin += plannedMinTotalCommessaSmart(c);
+
+        const q = Math.max(0, Number(c?.qtaPezzi || 0));
+        if (q){
+          const perPiece = plannedMinPerPiece(c);
+          perPieceNumer += perPiece * q;
+          piecesSel += q;
+        }
+      }
+    }
+
+    const pianPerPiece = piecesSel>0 ? (perPieceNumer / piecesSel) : 0;
+
+    const delta = effMin - pianMin;
+    const perc  = pianMin>0 ? (delta/pianMin)*100 : 0;
+
+    return { effMin, pianMin, pianPerPiece, piecesSel, delta, perc };
+  }catch(e){
+    console.warn('selectionTotals error', e);
+    return { effMin:0, pianMin:0, pianPerPiece:0, piecesSel:0, delta:0, perc:0 };
+  }
+}, [oreRowsAll, commesse, groupByRiga, commessaFilter, codiceFilter]);
+
+// ✅ fallback Report1: plannedMinTotal potrebbe non essere nello scope
+const plannedMinTotalFn_Report1 = (typeof plannedMinTotal === 'function')
+  ? plannedMinTotal
+  : function(c){
+      const fasi = Array.isArray(c?.fasi) ? c.fasi : [];
+      const q = Math.max(1, Number(c?.qtaPezzi||1));
+      if (fasi.length === 0){
+        const perPiece = (typeof c.oreMin==='number' ? c.oreMin : toMin(c.oreHHMM||'0')) || 0;
+        return Math.max(0, Math.round(perPiece * q));
+      }
+      let perPiece = 0, unaTantum = 0;
+      for (const f of fasi){
+           const min = plannedMinsFromFase(f);
+        if (f.unaTantum || f.once) unaTantum += min; else perPiece += min;
+      }
+      return Math.max(0, Math.round(unaTantum + perPiece * q));
+    };
 
 const righe = React.useMemo(()=>{
   const out = [];
   for (const c of (Array.isArray(commesse)?commesse:[])) {
     const perPezzo = plannedMinPerPiece(c);
-    const pianTot  = plannedMinTotal(c);
+    const pianTot  = plannedMinTotalCommessaSmart(c);
     const effMin   = (Array.isArray(oreRows)?oreRows:[])
     .filter(o => o.commessaId === c.id && o.faseIdx != null)
     .reduce((s,o)=> s + (
@@ -14225,12 +14588,82 @@ const q = (query||'').toLowerCase();
   const [fltFase, setFltFase]           = React.useState('');
   const [fltOperatore, setFltOperatore] = React.useState('');
   const [inclExtra, setInclExtra]       = React.useState(true);
+  const [fltCodice, setFltCodice]       = React.useState('');
+  const [groupByCodiceFase, setGroupByCodiceFase] = React.useState(false);
+  const [sortByCodFase, setSortByCodFase] = React.useState('codice'); // 'codice' | 'eff' | 'pian' | 'delta'
+  const [sortDirCodFase, setSortDirCodFase] = React.useState('asc'); // 'asc' | 'desc'
+  const [hideNoPlannedCodFase, setHideNoPlannedCodFase] = React.useState(true);
 
   // Sorgenti per tendina clienti
   const clienti = React.useMemo(()=>{
     const s = new Set();
     (commesse||[]).forEach(c => { const v = (c.cliente||'').trim(); if (v) s.add(v); });
     return Array.from(s).sort((a,b)=>a.localeCompare(b));
+  }, [commesse]);
+
+    // Sorgenti per tendina codici articolo (da oreRows + commesse)
+  const codiciArt = React.useMemo(()=>{
+    const s = new Set();
+
+    (Array.isArray(oreRows)?oreRows:[]).forEach(r=>{
+      const code = String(r?.rigaCodice||'').trim();
+      if (code) s.add(code);
+    });
+
+    (commesse||[]).forEach(c=>{
+      (Array.isArray(c?.righeArticolo)?c.righeArticolo:[]).forEach(row=>{
+        const code = String(row?.codice || row?.articoloCodice || '').trim();
+        if (code) s.add(code);
+      });
+    });
+
+    return Array.from(s).sort((a,b)=>a.localeCompare(b));
+  }, [oreRows, commesse]);
+  
+    // Pianificate per codice + fase (stessa chiave di orePerFase quando groupByCodiceFase)
+  const plannedPerCodFase = React.useMemo(()=>{
+    const map = new Map();
+    const commesseAll = Array.isArray(commesse) ? commesse : [];
+
+    for (const c of commesseAll){
+      const righe = Array.isArray(c?.righeArticolo) ? c.righeArticolo : [];
+      if (!righe.length) continue;
+
+      const totalPieces = righe.reduce((s,row)=> s + Math.max(0, Number(row?.qta || row?.qtaPezzi || 0)), 0) || 1;
+
+      for (const row of righe){
+        const code = String(row?.codice || row?.articoloCodice || '').trim();
+        if (!code) continue;
+
+        const qRow = Math.max(0, Number(row?.qta || row?.qtaPezzi || 0));
+
+        // fasi effettive per questa riga (ibrido intelligente)
+        const rowHasPlanned = Array.isArray(row?.fasi) && row.fasi.some(f => plannedMinsFromFase(f) > 0);
+        const fasiEff = rowHasPlanned
+          ? row.fasi
+          : (Array.isArray(c?.fasi) ? c.fasi : []);
+
+        for (let i=0; i<fasiEff.length; i++){
+          const f = fasiEff[i];
+          const minBase = plannedMinsFromFase(f);
+          if (!minBase) continue;
+
+          const isOnce = !!(f.unaTantum || f.once);
+
+          // per-fase pianificata per questa riga:
+          // - se una-tantum: spalmo per quota pezzi riga / totale commessa
+          // - altrimenti: per-pezzo * qtaRiga
+          const minRow = isOnce
+            ? minBase * (qRow / totalPieces)
+            : minBase * qRow;
+
+          const key = `${code}|${String(i)}`;
+          map.set(key, (map.get(key)||0) + minRow);
+        }
+      }
+    }
+
+    return map;
   }, [commesse]);
 
   // Aggregazione per (commessaId, faseIdx)
@@ -14247,6 +14680,8 @@ const q = (query||'').toLowerCase();
           : `Fase ${(Number(r.faseIdx)||0)+1}`;
       })().toLowerCase();
       const oper = (r.operatore||'').toLowerCase();
+      const codice = (r.rigaCodice||'').toLowerCase();
+      if (fltCodice && codice !== fltCodice.toLowerCase()) return false;
 
       if (fltCliente && cliente !== fltCliente.toLowerCase()) return false;
       if (fltCommessa && !idc.includes(fltCommessa.toLowerCase())) return false;
@@ -14257,17 +14692,26 @@ const q = (query||'').toLowerCase();
       return true;
     });
 
+        const byCodice = !!groupByCodiceFase;
+
     const map = new Map();
     for (const r of rows){
       const c = (commesse||[]).find(x => x.id === r.commessaId) || {};
+      const code = String(r.rigaCodice || '').trim();
+
       const isNoFase = (r.faseIdx == null || r.faseIdx === '');
       const isExtra  = isNoFase && isGasNote(r.note);
-      const keyFase  = isExtra ? 'EXTRA' : (isNoFase ? 'INTERA' : String(r.faseIdx|0));
+      const faseKey  = isExtra ? 'EXTRA' : (isNoFase ? 'INTERA' : String(r.faseIdx|0));
 
-      const cur = (map.get(keyFase) || {
-        commessaId: r.commessaId,
-        cliente: c.cliente || '',
-        descrizione: c.descrizione || '',
+      const key = byCodice
+        ? `${code || '(senza codice)'}|${faseKey}`
+        : `${r.commessaId}|${faseKey}`;
+
+      const cur = (map.get(key) || {
+        commessaId: byCodice ? '' : r.commessaId,
+        cliente: byCodice ? '' : (c.cliente || ''),
+        descrizione: byCodice ? (r.rigaDescrizione || c.descrizione || '') : (c.descrizione || ''),
+        codice: code,
         faseIdx: isNoFase ? null : (r.faseIdx|0),
         faseLabel: (isExtra
           ? 'EXTRA: Cambio Bombola Gas'
@@ -14275,21 +14719,122 @@ const q = (query||'').toLowerCase();
               ? 'Intera commessa'
               : ((typeof window.faseLabel === 'function') ? window.faseLabel(c, (r.faseIdx|0)) : `Fase ${(r.faseIdx|0)+1}`)
             )),
-        minutes: 0
+        minutes: 0,
+        __commesseSet: byCodice ? new Set() : null,
+        __clientiSet: byCodice ? new Set() : null
       });
+
+      if (byCodice){
+        if (r.commessaId) cur.__commesseSet.add(r.commessaId);
+        if (c?.cliente) cur.__clientiSet.add(c.cliente);
+      }
 
       const add = Number(r.oreMin)||toMin(r.oreHHMM)||0;
       cur.minutes += add;
-      map.set(keyFase, cur);
+      map.set(key, cur);
     }
 
-    return Array.from(map.values())
-      .sort((a,b)=> (a.commessaId.localeCompare(b.commessaId) || String(a.faseIdx??99).localeCompare(String(b.faseIdx??99))));
-  }, [oreRows, commesse, fltCliente, fltCommessa, fltDescr, fltFase, fltOperatore, inclExtra]);
+        let arr = Array.from(map.values()).map(x=>{
+      if (!byCodice) return x;
+        return {
+        codice: x.codice,
+        descrizione: x.descrizione,
+        faseIdx: x.faseIdx,
+        faseLabel: x.faseLabel,
+        minutes: x.minutes,
+        pianMinutes: (x.faseIdx==null ? 0 : (plannedPerCodFase.get(`${x.codice}|${String(x.faseIdx)}`) || 0)),
+        commesseN: x.__commesseSet ? x.__commesseSet.size : 0,
+        clientiN: x.__clientiSet ? x.__clientiSet.size : 0
+      };
+    });
 
-  function exportCSV_Fasi(){
-    const header = ['Cliente','Commessa','Descrizione','Fase','Minuti','HH:MM'];
-    const body = orePerFase.map(r => [r.cliente, r.commessaId, r.descrizione, r.faseLabel, String(r.minutes), fmt(r.minutes)]);
+        // delta solo quando raggruppo per codice/fase
+    if (byCodice){
+      for (const r of arr){
+        const pian = Number(r.pianMinutes)||0;
+        const eff  = Number(r.minutes)||0;
+        r.deltaMinutes = eff - pian;
+        r.scostPerc = pian>0 ? ((r.deltaMinutes / pian) * 100) : null;
+      }
+    }
+
+      if (byCodice && hideNoPlannedCodFase){
+        arr = arr.filter(r => (Number(r.pianMinutes)||0) > 0);
+      }
+
+        return arr.sort((a,b)=>{
+      if (byCodice){
+        const dir = (sortDirCodFase === 'asc') ? 1 : -1;
+
+        let cmp = 0;
+        if (sortByCodFase === 'codice'){
+          cmp = String(a.codice||'').localeCompare(String(b.codice||'')) * dir;
+        } else {
+          const aVal =
+            (sortByCodFase === 'eff')   ? (Number(a.minutes)||0) :
+            (sortByCodFase === 'pian')  ? (Number(a.pianMinutes)||0) :
+            (sortByCodFase === 'delta') ? (Number(a.deltaMinutes)||0) :
+            0;
+
+          const bVal =
+            (sortByCodFase === 'eff')   ? (Number(b.minutes)||0) :
+            (sortByCodFase === 'pian')  ? (Number(b.pianMinutes)||0) :
+            (sortByCodFase === 'delta') ? (Number(b.deltaMinutes)||0) :
+            0;
+
+          cmp = (aVal - bVal) * dir;
+        }
+
+        if (cmp !== 0) return cmp;
+        return String(a.faseIdx??99).localeCompare(String(b.faseIdx??99));
+      }
+
+      return (a.commessaId.localeCompare(b.commessaId) ||
+              String(a.faseIdx??99).localeCompare(String(b.faseIdx??99)));
+    });
+    }, [oreRows, commesse, fltCliente, fltCommessa, fltDescr, fltFase, fltOperatore, inclExtra, fltCodice, groupByCodiceFase, plannedPerCodFase, sortByCodFase, sortDirCodFase, hideNoPlannedCodFase]);
+    
+      // Opzioni fase per tendina (derivate dai risultati correnti)
+  const faseOptions = React.useMemo(()=>{
+    const s = new Set();
+    (orePerFase||[]).forEach(r=>{
+      const lbl = String(r?.faseLabel||'').trim();
+      if (lbl) s.add(lbl);
+    });
+    return Array.from(s).sort((a,b)=>a.localeCompare(b));
+  }, [orePerFase]);
+
+      // Totali per il codice selezionato (solo quando groupByCodiceFase)
+  const totalsCodFase = React.useMemo(()=>{
+    if (!groupByCodiceFase) return null;
+    if (!fltCodice) return null;
+    if (!Array.isArray(orePerFase) || orePerFase.length===0) return null;
+
+    const eff  = orePerFase.reduce((s,r)=> s + (Number(r.minutes)||0), 0);
+    const pian = orePerFase.reduce((s,r)=> s + (Number(r.pianMinutes)||0), 0);
+    const delta = eff - pian;
+    const perc  = pian>0 ? (delta/pian)*100 : null;
+
+    return { eff, pian, delta, perc };
+  }, [groupByCodiceFase, fltCodice, orePerFase]);
+
+    function exportCSV_Fasi(){
+    const header = groupByCodiceFase
+      ? ['Codice','Descrizione','Fase','Eff Min','Eff HH:MM','Pian Min','Pian HH:MM','Delta Min','Scost %','#Commesse','#Clienti']
+      : ['Cliente','Commessa','Descrizione','Fase','Minuti','HH:MM'];
+
+    const body = orePerFase.map(r => groupByCodiceFase
+      ? [
+        r.codice, r.descrizione, r.faseLabel,
+        String(r.minutes), fmt(r.minutes),
+        String(Math.round(r.pianMinutes||0)), fmt(r.pianMinutes||0),
+        String(Math.round(r.deltaMinutes||0)),
+        (r.scostPerc==null ? '' : r.scostPerc.toFixed(1)),
+        String(r.commesseN||0), String(r.clientiN||0)
+      ]
+
+      : [r.cliente, r.commessaId, r.descrizione, r.faseLabel, String(r.minutes), fmt(r.minutes)]
+    );
     const csv = [header, ...body].map(row =>
       row.map(v => {
         const s = String(v||'');
@@ -14309,14 +14854,69 @@ const q = (query||'').toLowerCase();
         e('input', { type:'checkbox', checked:groupByRiga, onChange:ev=>setGroupByRiga(ev.target.checked) }),
         e('span', null, 'Raggruppa per riga articolo')
       ),
-      e('div', { className:'row', style:{ gap:6, alignItems:'center' } },
+            e('div', { className:'row', style:{ gap:6, alignItems:'center' } },
         e('span', { className:'muted' }, 'Commessa'),
         e('select', { value:commessaFilter, onChange:ev=>setCommessaFilter(ev.target.value) },
           e('option', { value:'' }, '— tutte —'),
           commesseIds.map(id => e('option', { key:id, value:id }, id))
         )
+      ),
+
+      // filtro per codice articolo (solo se groupByRiga)
+      groupByRiga && e('div', { className:'row', style:{ gap:6, alignItems:'center' } },
+        e('span', { className:'muted' }, 'Codice articolo'),
+        e('select', {
+          value: codiceFilter,
+          onChange: ev => setCodiceFilter(ev.target.value)
+        },
+          e('option', { value:'' }, '— tutti —'),
+          codiciList.map(cod => e('option', { key:cod, value:cod }, cod))
+        )
       )
     ),
+
+        // === R3: riepilogo tempi per selezione attuale ===
+    ( (commessaFilter || (groupByRiga && codiceFilter)) ) && e('div', {className:'card', style:{marginTop:8}},
+      e('div', {className:'row', style:{justifyContent:'space-between', alignItems:'center'}},
+        e('div', null,
+          e('div', {style:{fontWeight:700}}, 'Totale selezione'),
+          e('div', {className:'muted', style:{fontSize:13}},
+            commessaFilter ? `Commessa: ${commessaFilter}` : 'Commessa: tutte',
+            (groupByRiga && codiceFilter) ? ` • Codice: ${codiceFilter}` : ''
+          )
+        ),
+        e('div', {className:'row', style:{gap:12}},
+          e('div', null,
+            e('div', {className:'muted', style:{fontSize:12}}, 'Pianificate'),
+            e('div', {style:{fontWeight:700}}, fmt(selectionTotals.pianMin))
+          ),
+          e('div', null,
+            e('div', {className:'muted', style:{fontSize:12}}, 'Pian. per pezzo'),
+            e('div', {style:{fontWeight:700}}, fmt(selectionTotals.pianPerPiece))
+          ),
+          e('div', null,
+            e('div', {className:'muted', style:{fontSize:12}}, 'Effettive'),
+            e('div', {style:{fontWeight:700}}, fmt(selectionTotals.effMin))
+          ),
+          e('div', null,
+            e('div', {className:'muted', style:{fontSize:12}}, 'Delta'),
+            e('div', {
+              style:{
+                fontWeight:700,
+                color: selectionTotals.delta>0 ? '#b91c1c' : (selectionTotals.delta<0 ? '#065f46' : '#374151')
+              }
+            }, (selectionTotals.delta>=0?'+':'') + fmt(selectionTotals.delta))
+          ),
+          e('div', null,
+            e('div', {className:'muted', style:{fontSize:12}}, 'Scost. %'),
+            e('div', {style:{fontWeight:700}},
+              (selectionTotals.perc>=0?'+':'') + (Math.round(selectionTotals.perc*10)/10).toFixed(1) + '%'
+            )
+          )
+        )
+      )
+    ),
+
     groupByRiga && e('div', { style:{ marginTop:8 } },
       e('table', { className:'table' },
         e('thead', null, e('tr', null,
@@ -14330,7 +14930,7 @@ const q = (query||'').toLowerCase();
           e('th', null, 'Ore HH:MM')
         )),
         e('tbody', null,
-          aggRows.map((r, i) => e('tr', { key:i },
+           aggRowsFiltered.map((r, i) => e('tr', { key:i },
             e('td', null, r.commessaId),
             e('td', null, r.rigaIdx==null ? '—' : String(r.rigaIdx+1)),
             e('td', null, r.rigaCodice || ''),
@@ -14402,7 +15002,7 @@ const q = (query||'').toLowerCase();
       )
     ),
     e('div', {className:'card'},
-      e('div', {className:'grid', style:{gap:8, gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))'}},
+       e('div', {className:'grid', style:{gap:8, gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))'}},
         e('label', null, 'Cliente',
           e('select', {value:fltCliente, onChange:ev=>setFltCliente(ev.target.value)},
             e('option', {value:''}, '— Tutti —'),
@@ -14415,38 +15015,180 @@ const q = (query||'').toLowerCase();
         e('label', null, 'Descrizione/Articolo contiene',
           e('input', {value:fltDescr, onChange:ev=>setFltDescr(ev.target.value), placeholder:'articolo/descrizione'})
         ),
-        e('label', null, 'Fase contiene',
-          e('input', {value:fltFase, onChange:ev=>setFltFase(ev.target.value), placeholder:'es. Taglio'})
+        e('label', null, 'Codice articolo',
+          e('select', {value:fltCodice, onChange:ev=>setFltCodice(ev.target.value)},
+            e('option', {value:''}, '— Tutti —'),
+            codiciArt.map(code => e('option', {key:code, value:code}, code))
+          )
+        ),
+        e('label', {className:'row', style:{alignItems:'center', gap:6, marginTop:6, gridColumn:'1 / -1'}},
+          e('input', {type:'checkbox', checked:groupByCodiceFase, onChange:ev=>setGroupByCodiceFase(ev.target.checked)}),
+          e('span', null, 'Raggruppa per codice articolo (tutte le commesse)')
+        ),
+        e('label', null, 'Ordina per (solo raggruppa codice)',
+          e('div', {className:'row', style:{gap:6}},
+            e('select', {
+              value: sortByCodFase,
+              onChange: ev=>setSortByCodFase(ev.target.value),
+              disabled: !groupByCodiceFase
+            },
+              e('option', {value:'codice'}, 'Codice'),
+              e('option', {value:'eff'},    'Effettive'),
+              e('option', {value:'pian'},   'Pianificate'),
+              e('option', {value:'delta'},  'Delta')
+            ),
+            e('select', {
+              value: sortDirCodFase,
+              onChange: ev=>setSortDirCodFase(ev.target.value),
+              disabled: !groupByCodiceFase
+            },
+              e('option', {value:'asc'},  '↑ Crescente'),
+              e('option', {value:'desc'}, '↓ Decrescente')
+            )
+          )
+        ),
+        e('label', {className:'row', style:{alignItems:'center', gap:6, marginTop:6, gridColumn:'1 / -1'}},
+          e('input', {
+            type:'checkbox',
+            checked: hideNoPlannedCodFase,
+            onChange: ev=>setHideNoPlannedCodFase(ev.target.checked),
+            disabled: !groupByCodiceFase
+          }),
+          e('span', null, 'Nascondi fasi senza pianificate')
+        ),
+                e('label', null, 'Fase',
+          e('div', {className:'row', style:{gap:6}},
+            e('select', {
+              value: faseOptions.includes(fltFase) ? fltFase : '',
+              onChange: ev=>setFltFase(ev.target.value)
+            },
+              e('option', {value:''}, '— Tutte —'),
+              faseOptions.map(f => e('option', {key:f, value:f}, f))
+            ),
+            e('input', {
+              value: fltFase,
+              onChange: ev=>setFltFase(ev.target.value),
+              placeholder:'contiene…'
+            })
+          )
         ),
         e('label', null, 'Operatore contiene',
           e('input', {value:fltOperatore, onChange:ev=>setFltOperatore(ev.target.value), placeholder:'es. Mario'})
         ),
-        e('label', {className:'row', style:{alignItems:'center', gap:6, marginTop:6}},
+        e('label', {className:'row', style:{alignItems:'center', gap:6, marginTop:6, gridColumn:'1 / -1'}},
           e('input', {type:'checkbox', checked:inclExtra, onChange:ev=>setInclExtra(ev.target.checked)}),
           e('span', null, 'Includi EXTRA (Cambio Bombola Gas)')
         )
-      ),
+            ),
+                  totalsCodFase
+        ? e('div', {className:'card', style:{marginTop:8, display:'flex', gap:14, alignItems:'center', flexWrap:'wrap'}},
+            e('div', null,
+              e('div', {className:'muted', style:{fontSize:12}}, 'Totale codice'),
+              e('div', {style:{fontWeight:700}}, fltCodice)
+            ),
+            e('div', null,
+              e('div', {className:'muted', style:{fontSize:12}}, 'Pianificate'),
+              e('div', {style:{fontWeight:700}}, fmt(totalsCodFase.pian))
+            ),
+            e('div', null,
+              e('div', {className:'muted', style:{fontSize:12}}, 'Effettive'),
+              e('div', {style:{fontWeight:700}}, fmt(totalsCodFase.eff))
+            ),
+            e('div', null,
+              e('div', {className:'muted', style:{fontSize:12}}, 'Delta'),
+              e('div', {style:{fontWeight:700, color: totalsCodFase.delta>0 ? '#b91c1c' : '#065f46'}},
+                fmt(totalsCodFase.delta)
+              )
+            ),
+            e('div', null,
+              e('div', {className:'muted', style:{fontSize:12}}, 'Scost.%'),
+              e('div', {style:{fontWeight:700}},
+                totalsCodFase.perc==null ? '—' : (totalsCodFase.perc.toFixed(1)+'%')
+              )
+            )
+          )
+        : null,
+
       orePerFase.length===0
         ? e('div', {className:'muted', style:{marginTop:8}}, 'Nessun risultato con i filtri correnti.')
         : e('table', {className:'table', style:{marginTop:8}},
-            e('thead', null, e('tr', null,
-              e('th', null, 'Cliente'),
-              e('th', null, 'Commessa'),
-              e('th', null, 'Descrizione'),
-              e('th', null, 'Fase'),
-              e('th', {className:'right'}, 'Minuti'),
-              e('th', {className:'right'}, 'HH:MM')
-            )),
-            e('tbody', null,
-              orePerFase.map((r,i) => e('tr', {key:i},
-                e('td', null, r.cliente || '—'),
-                e('td', null, r.commessaId || '—'),
-                e('td', null, r.descrizione || '—'),
-                e('td', null, r.faseLabel || '—'),
-                e('td', {className:'right'}, String(r.minutes)),
-                e('td', {className:'right'}, fmt(r.minutes))
-              ))
-            )
+            (groupByCodiceFase
+              ? e('thead', null, e('tr', null,
+                  e('th', null, 'Codice'),
+                  e('th', null, 'Descrizione'),
+                  e('th', null, 'Fase'),
+                  e('th', {className:'right'}, 'Effettive'),
+                  e('th', {className:'right'}, 'Eff. HH:MM'),
+                  e('th', {className:'right'}, 'Pianificate'),
+                  e('th', {className:'right'}, 'Pian. HH:MM'),
+                  e('th', {className:'right'}, 'Delta'),
+                  e('th', {className:'right'}, 'Scost.%'),
+                  e('th', {className:'right'}, '#Commesse'),
+                  e('th', {className:'right'}, '#Clienti')
+                ))
+              : e('thead', null, e('tr', null,
+                  e('th', null, 'Cliente'),
+                  e('th', null, 'Commessa'),
+                  e('th', null, 'Descrizione'),
+                  e('th', null, 'Fase'),
+                  e('th', {className:'right'}, 'Minuti'),
+                  e('th', {className:'right'}, 'HH:MM')
+                ))
+            ),
+                        e('tbody', null, [
+              ...orePerFase.map((r,i) => groupByCodiceFase
+                ? e('tr', {key:i},
+                    e('td', null, r.codice || '—'),
+                    e('td', null, r.descrizione || '—'),
+                    e('td', null, r.faseLabel || '—'),
+                    e('td', {className:'right'}, String(r.minutes)),
+                    e('td', {className:'right'}, fmt(r.minutes)),
+                    e('td', {className:'right'}, String(Math.round(r.pianMinutes||0))),
+                    e('td', {className:'right'}, fmt(r.pianMinutes||0)),
+                    e('td', {className:'right'}, String(Math.round(r.deltaMinutes||0))),
+                    e('td', {className:'right'}, (r.scostPerc==null ? '—' : (r.scostPerc.toFixed(1)+'%'))),
+                    e('td', {className:'right'}, String(r.commesseN||0)),
+                    e('td', {className:'right'}, String(r.clientiN||0))
+                  )
+                : e('tr', {key:i},
+                    e('td', null, r.cliente || '—'),
+                    e('td', null, r.commessaId || '—'),
+                    e('td', null, r.descrizione || '—'),
+                    e('td', null, r.faseLabel || '—'),
+                    e('td', {className:'right'}, String(r.minutes)),
+                    e('td', {className:'right'}, fmt(r.minutes))
+                  )
+              ),
+
+              // --- Riga TOTALE ---
+              (() => {
+                const effTot = orePerFase.reduce((s,r)=> s + (Number(r.minutes)||0), 0);
+
+                if (groupByCodiceFase){
+                  const pianTot  = orePerFase.reduce((s,r)=> s + (Number(r.pianMinutes)||0), 0);
+                  const deltaTot = effTot - pianTot;
+                  const percTot  = pianTot>0 ? (deltaTot/pianTot)*100 : null;
+
+                  return e('tr', {key:'__tot', className:'totrow'},
+                    e('td', {colSpan:3, style:{fontWeight:700}}, 'TOTALE'),
+                    e('td', {className:'right', style:{fontWeight:700}}, String(Math.round(effTot))),
+                    e('td', {className:'right', style:{fontWeight:700}}, fmt(effTot)),
+                    e('td', {className:'right', style:{fontWeight:700}}, String(Math.round(pianTot))),
+                    e('td', {className:'right', style:{fontWeight:700}}, fmt(pianTot)),
+                    e('td', {className:'right', style:{fontWeight:700}}, String(Math.round(deltaTot))),
+                    e('td', {className:'right', style:{fontWeight:700}}, (percTot==null ? '—' : (percTot.toFixed(1)+'%'))),
+                    e('td', {className:'right'}, ''),
+                    e('td', {className:'right'}, '')
+                  );
+                }
+
+                return e('tr', {key:'__tot', className:'totrow'},
+                  e('td', {colSpan:4, style:{fontWeight:700}}, 'TOTALE'),
+                  e('td', {className:'right', style:{fontWeight:700}}, String(Math.round(effTot))),
+                  e('td', {className:'right', style:{fontWeight:700}}, fmt(effTot))
+                );
+              })()
+            ])
           )
     )
   );
@@ -14548,7 +15290,7 @@ function MagazzinoView(props){
   const [articoli, setArticoli]     = React.useState(()=> normalizeArticoli(lsGet('magArticoli', [])));
   const [movimenti, setMovimenti]   = React.useState(()=> lsGet('magMovimenti', []));
   const [q, setQ]                   = React.useState('');
-  const [editArt, setEditArt]       = React.useState(null); // {codice, descrizione, um, prezzo} | null
+  const [editArt, setEditArt]       = React.useState(null); // {codice, descrizione, um, prezzo, costo} | null
   const [schedaArt, setSchedaArt]   = React.useState(null); // articolo o null
   const [newMov, setNewMov]         = React.useState({ data:new Date().toISOString().slice(0,10), codice:'', qta:0, note:'' });
   // --- selezione multipla articoli ---
@@ -14590,17 +15332,24 @@ function MagazzinoView(props){
     if (k.includes('codice') || k==='codice') return 'codice';
     if (k.includes('descri')) return 'descrizione';
     if (k==='um' || k.includes('u.m')) return 'um';
-    if (k.includes('prezzo') || k.includes('costo')) return 'prezzo';
+    if (k.includes('costo')) return 'costo';
+    if (k.includes('prezzo')) return 'prezzo';
     return k;
   }
   function mapArticolo(row){
     const o = {};
     Object.keys(row||{}).forEach(k=> o[normArtKey(k)] = row[k]);
+
+    const costoStr = o.costo;
+    const hasCosto = (costoStr!=null && String(costoStr).trim()!=='');
+    const costoNum = hasCosto ? (Number(String(costoStr).replace(',','.')) || 0) : undefined;
+
     return {
       codice: String(o.codice||'').trim(),
       descrizione: String(o.descrizione||'').trim(),
       um: (String(o.um||'').trim().toUpperCase() || 'PZ'),
-      prezzo: Number(String(o.prezzo||'').replace(',','.')) || 0
+      prezzo: Number(String(o.prezzo||'').replace(',','.')) || 0,
+      ...(costoNum!=null ? { costo: costoNum } : {})
     };
   }
 
@@ -14682,7 +15431,7 @@ function MagazzinoView(props){
   }
 
   // ================== Articoli: CRUD minimale ==================
-  function newArt(){ return { codice:'', descrizione:'', um:'PZ', prezzo:0 }; }
+  function newArt(){ return { codice:'', descrizione:'', um:'PZ', prezzo:0, costo:0 }; }
   function openNewArt(){ setEditArt(newArt()); }
   function openEditArt(a){ setEditArt({ ...a }); }
   function cancelEditArt(){ setEditArt(null); }
@@ -14770,8 +15519,16 @@ function MagazzinoView(props){
           e('input', {value:editArt.descrizione||'', onChange:ev=>setEditArt({...editArt, descrizione:ev.target.value})})
         ),
         e('label', null, 'Prezzo',
-          e('input', {type:'number', step:'0.01', value:editArt.prezzo ?? 0, onChange:ev=>setEditArt({...editArt, prezzo:Number(ev.target.value||0)})})
+          e('input', {type:'number', step:'0.01', value:editArt.prezzo||0, onChange:ev=>setEditArt({...editArt, prezzo:Number(ev.target.value||0)})})
+        ),
+        e('label', null, 'Costo',
+          e('input', {
+            type:'number', step:'0.01',
+            value:(editArt.costo!=null ? editArt.costo : 0),
+            onChange:ev=>setEditArt({...editArt, costo:Number(ev.target.value||0)})
+          })
         )
+
       ),
       e('div', {className:'actions', style:{justifyContent:'flex-end', gap:8}},
         e('button', {className:'btn btn-outline', type:'button', onClick:cancelEditArt}, 'Annulla'),
@@ -14788,6 +15545,7 @@ function MagazzinoView(props){
           e('th', null, 'Descrizione'),
           e('th', null, 'UM'),
           e('th', {style:{textAlign:'right'}}, 'Prezzo'),
+          e('th', {style:{textAlign:'right'}}, 'Costo'),
           e('th', {style:{textAlign:'right'}}, 'Giac.'),
           e('th', {style:{textAlign:'center', width:28}}, 
             e('input', {
@@ -14804,7 +15562,9 @@ function MagazzinoView(props){
           e('td', null, a.descrizione),
           e('td', null, a.um||''),
           e('td', {style:{textAlign:'right'}}, (a.prezzo!=null? Number(a.prezzo).toFixed(2):'')),
+          e('td', {style:{textAlign:'right'}}, (a.costo!=null? Number(a.costo).toFixed(2):'')),
           e('td', {style:{textAlign:'right'}}, giacenze.get(String(a.codice).toLowerCase()) || 0),
+
           // selezione
           e('td', {style:{textAlign:'center'}},
             e('input', {
@@ -14937,12 +15697,16 @@ class ErrorBoundary extends React.Component {
   componentDidCatch(err, info){ console.error('[ErrorBoundary]', err, info); }
   render(){
     if (this.state.err){
-      return React.createElement('div',{className:'card',style:{color:'#b00020',whiteSpace:'pre-wrap'}},
-        'Errore UI: ', String(this.state.err));
+      return React.createElement(
+        'div',
+        {className:'card',style:{color:'#b00020',whiteSpace:'pre-wrap'}},
+        'Errore UI: ', String(this.state.err)
+      );
     }
     return this.props.children;
   }
 }
+
 function safeView(Comp, name, props){
   const e = React.createElement;
 
@@ -14971,218 +15735,11 @@ function safeView(Comp, name, props){
       }
     }
   }
+
   return e(Guard);
 }
-/* ================== APP (menu & switch, con TIMBRATURA) ================== */
-function App() {
-  // Se è attivo il layout con Sidebar moderna, non renderizzare il layout legacy
-  if (document.querySelector('aside.sidebar')) { return null; }
-
-  const e = React.createElement;
-
-  // Stato di tab e filtro
- const [tab, setTab] = React.useState(() => {
-  try { return localStorage.getItem('activeTab') || 'Dashboard'; }
-  catch { return 'Dashboard'; }
- });
-
- // Espone setTab globalmente (DEVE stare fuori da useState)
- React.useEffect(() => {
-  window.setTab = setTab;
-  return () => { if (window.setTab === setTab) window.setTab = null; };
- }, []);
-
-
-  const [query, setQuery] = React.useState('');
-  React.useEffect(() => { try { localStorage.setItem('activeTab', tab); } catch {} }, [tab]);
-
-  // === Ricerca globale per le view che accettano {query} ===
-  const [search, setSearch] = React.useState('');
-
-  // Routing via hash -> TIMBRATURA
-  React.useEffect(() => {
-    function syncFromHash(){
-    const h = (location.hash || '').toLowerCase();
-    if      (h.startsWith('#/timbratura'))     setTab('TIMBRATURA');
-    else if (h.startsWith('#/impostazioni'))   setTab('Impostazioni');
-    else if (h.startsWith('#/fatture'))        setTab('Fatture');
-    else if (h.startsWith('#/ddt'))            setTab('DDT');
-    else if (h.startsWith('#/ordini'))         setTab('OrdiniFornitori');
-    else if (h.startsWith('#/ore'))            setTab('ORE');
-    else if (h.startsWith('#/magazzino'))      setTab('Magazzino');
-    else if (h.startsWith('#/report'))         setTab('REPORT');
-    else                                       setTab('Dashboard');
-    }
-    window.addEventListener('hashchange', syncFromHash);
-    syncFromHash();
-    return () => window.removeEventListener('hashchange', syncFromHash);
-  }, []);
-
-    React.useEffect(() => {
-    const t = setInterval(() => {
-      try{
-        const a = (function(){ try{ return JSON.parse(localStorage.getItem('appSettings')||'{}'); }catch{return{}} })();
-        if (a.cloudEnabled && typeof window.syncImportFromCloud === 'function') {
-        window.syncImportFromCloud(); // pull dallo snapshot anima_sync
-        }
-      }catch{}
-        }, 15000); // ogni 15s
-      return () => clearInterval(t);
-    }, []);
-
-
-   // ROUTE FULL-SCREEN per #/operatore (solo timbratura)
-  if ((window.location.hash || '').startsWith('#/operatore')) {
-  return e(ErrorBoundary, null,
-    e('main', null, e(OperatoreApp))
-  );
-  }
-
-  // ROUTE FULL-SCREEN per #/timbratura (via QR)  ⬅️  INCOLLA QUI
-  if ((window.location.hash || '').startsWith('#/timbratura')) {
-    return e(ErrorBoundary, null,
-      e('main', null, e(TimbraturaMobileView))
-    );
-  }
-  // FINE INSERIMENTO
-
-  // Tabs
-  const TABS = [
-    { label: 'Dashboard',         key: 'Dashboard' },
-    { label: 'Commesse',          key: 'Commesse' },
-    { label: 'Clienti',           key: 'Clienti' },
-    { label: 'Fornitori',         key: 'Fornitori' },
-    { label: 'Ordini Fornitori',  key: 'OrdiniFornitori' },
-    { label: 'DDT',               key: 'DDT' },
-    { label: 'Fatture',           key: 'Fatture' },
-    { label: 'Ore',               key: 'ORE' },
-    { label: 'Magazzino',         key: 'Magazzino' },
-    { label: 'Movimenti', key: 'MagazzinoMovimenti' }, // al posto della vecchia key
-    { label: 'Report tempi',      key: 'REPORT' },
-    { label: 'Report materiali',  key: 'REPORT_MAT' },
-    { label: 'Impostazioni',      key: 'Impostazioni' }
-  ];
-
-  function navBtn(label, key) {
-    const synonyms = { Ore:['ORE','Ore'], 'Report tempi':['REPORT','Report'], 'Report materiali':['REPORT_MAT'] };
-    const isActive = tab === key || (synonyms[label] && synonyms[label].includes(tab));
-    return e('button', {
-      key,
-      className: isActive ? 'btn' : 'btn btn-outline',
-      style: { width: '100%', textAlign: 'left' },
-      onClick: () => { setTab(key); if ((location.hash||'').startsWith('#/timbratura')) location.hash = ''; }
-    }, label);
-  }
-
-  // Switch delle viste – SEMPRE con safeView
-  function renderTab() {
-    // Usa una query sicura anche se search non è stato ancora inizializzato
-    const q = (typeof search === 'string') ? search : '';
-
-  // priorità alla timbratura mobile via QR/hash
-  if ((window.location.hash || '').startsWith('#/timbratura')) {
-    return React.createElement(TimbraturaMobileView);
-  }
-    
-    switch (tab) {
-      case 'TIMBRATURA':
-        return safeView((typeof TimbraturaMobileView === 'function' ? TimbraturaMobileView : window.TimbraturaMobileView), 'Timbratura');
-
-      case 'Dashboard':
-        return safeView((typeof DashboardView === 'function' ? DashboardView : window.DashboardView), 'Dashboard', { query });
-
-      case 'Commesse':
-        return safeView(CommesseView, 'Commesse', { query });
-
-      case 'Clienti':
-        return safeView((typeof ClientiView === 'function' ? ClientiView : window.ClientiView), 'Clienti');
-
-      case 'Fornitori':
-        return safeView((typeof FornitoriView === 'function' ? FornitoriView : window.FornitoriView), 'Fornitori');
-
-      case 'OrdiniFornitori':
-        return safeView(window.OrdiniFornitoriView || OrdiniFornitoriView, 'Ordini Fornitori');
-
-      case 'DDT':
-        return safeView((typeof DDTView === 'function' ? DDTView : window.DDTView), 'DDT', { query });
-
-      case 'Fatture':
-        return safeView(FattureView, 'Fatture', { query });
-
-      case 'Ore':
-      case 'ORE':
-        return safeView((typeof RegistrazioniOreView === 'function' ? RegistrazioniOreView : window.RegistrazioniOreView), 'Registrazioni Ore', { query });
-
-      case 'Magazzino':
-        return safeView((typeof MagazzinoView === 'function' ? MagazzinoView : window.MagazzinoView), 'Magazzino', { query });
-        case 'MagazzinoMovimenti':
-        case 'Movimenti':
-        case 'Magazzino ▸ Movimenti':
-        return safeView((typeof MagazzinoMovimentiView==='function' ? MagazzinoMovimentiView : window.MagazzinoMovimentiView), 'Movimenti', { query });
-
-      case 'Report':
-      case 'REPORT':
-        return safeView((typeof ReportTempiView === 'function' ? ReportTempiView : window.ReportTempiView), 'Report tempi', { query });
-
-      case 'REPORT_MAT':
-        return safeView((typeof ReportView === 'function' ? ReportView : window.ReportView), 'Report materiali', { query });
-
-      case 'Impostazioni':
-        return safeView((typeof ImpostazioniView === 'function' ? ImpostazioniView : window.ImpostazioniView), 'Impostazioni');
-
-      default:
-        return safeView(CommesseView, 'Commesse', { query });
-    }
-  }
-
-  const titleMap = { ORE: 'Ore', REPORT: 'Report tempi', REPORT_MAT: 'Report materiali', TIMBRATURA:'Timbratura' };
-  const title = titleMap[tab] || tab;
-  const showSearch = !['Dashboard', 'Impostazioni', 'TIMBRATURA'].includes(tab);
-
-  // Layout speciale TIMBRATURA (senza sidebar)
-  if (tab === 'TIMBRATURA') {
-    return e(ErrorBoundary, null,
-      e('main', null,
-        e('div', { className:'actions', style:{ justifyContent:'space-between', marginBottom:12 } },
-          e('h2', null, 'Timbratura'),
-          e('div', null,
-            e('button', { className:'btn btn-outline', onClick:()=>{ location.hash=''; setTab('Dashboard'); } }, 'Chiudi')
-          )
-        ),
-        renderTab()
-      )
-    );
-  }
-
-  // Layout standard
-  return e(ErrorBoundary, null,
-    e('div', { style:{ display:'grid', gridTemplateColumns:'220px 1fr', gap:16 } },
-
-      e('aside', { className:'card', style:{ padding:12, position:'sticky', top:12, alignSelf:'start' } },
-        e('div', { style:{ display:'grid', gap:6 } }, TABS.map(t => navBtn(t.label, t.key)))
-      ),
-
-      e('main', null,
-        e('div', { className:'actions', style:{ justifyContent:'space-between', marginBottom:12 } },
-          e('h2', null, title),
-          showSearch && e('div', { className:'row', style:{ gap:6 } },
-            e('input', { placeholder:'Cerca…', value:query, onChange:ev=>setQuery(ev.target.value) }),
-            query ? e('button', { className:'btn btn-outline', onClick:()=>setQuery('') }, 'Pulisci') : null
-          )
-        ),
-        renderTab()
-      )
-    )
-  );
-  
-}
-
-// << dopo la chiusura di function App >>
-if (!window.__ANIMA_APP_MOUNTED__) {
-  window.App = App;
-  if (window.requestAppRerender) window.requestAppRerender();
-}
-
+// rendi safeView disponibile ovunque (serve alle view/route moderne se lo usano)
+window.safeView = window.safeView || safeView;
 
 /* ================== OPERATORE APP (solo timbratura) ================== */
 function OperatoreApp(){
@@ -15779,6 +16336,7 @@ window.ensureCommessaRowIds = window.ensureCommessaRowIds || function ensureComm
   }
 };
 
+
 // === Commesse: assicura fasi per-riga (scaffolding per refactor G) ===
 window.ensureCommessaRowFasi = window.ensureCommessaRowFasi || function ensureCommessaRowFasi(comm){
   try{
@@ -15815,6 +16373,42 @@ window.ensureCommessaRowFasi = window.ensureCommessaRowFasi || function ensureCo
     return comm;
   }
 };
+
+// === MIGRAZIONE ONE-SHOT: duplica fasi globali dentro righeArticolo (per vecchie commesse) ===
+(function migrateCommessaRowFasiOnce(){
+  try{
+    const FLAG = 'mig_commessa_row_fasi_v1';
+
+    const _lsGet = (typeof lsGet === 'function')
+      ? lsGet
+      : (k, d) => { try{ return JSON.parse(localStorage.getItem(k)||'null') ?? d; }catch{ return d; } };
+
+    const _lsSet = (typeof lsSet === 'function')
+      ? lsSet
+      : (k, v) => { try{ localStorage.setItem(k, JSON.stringify(v)); }catch{} };
+
+    if (_lsGet(FLAG, false)) return;
+
+    const all = _lsGet('commesseRows', []);
+    if (!Array.isArray(all) || !all.length){
+      _lsSet(FLAG, true);
+      return;
+    }
+
+    const next = all.map(c => ensureCommessaRowFasi(c));
+    const changed = JSON.stringify(all) !== JSON.stringify(next);
+
+    if (changed){
+      _lsSet('commesseRows', next);
+      window.__anima_dirty = true;
+      console.log('MIG row fasi v1 applicata ✅');
+    }
+
+    _lsSet(FLAG, true);
+  }catch(e){
+    console.warn('migrateCommessaRowFasiOnce', e);
+  }
+})();
 
 // utility: trova commessa per id
 window.findCommessaById = window.findCommessaById || function(id){
@@ -16267,6 +16861,61 @@ var TimbraturaMobileView = function(){
     return Math.min(qTot, Math.min(...perPhase));
   };
 
+    // ---- G1-UI: progressi per-riga (con fallback legacy) ----
+  function producedPiecesUI(c, rigaIdx){
+    if (!c) return 0;
+
+    const totComm = Math.max(1, Number(c.qtaPezzi || 1));
+    const idxNum =
+      (rigaIdx === '' || rigaIdx == null) ? null : Number(rigaIdx);
+
+    // 1) Se ho una riga selezionata e ha fasi per-riga → usa quelle
+    if (Number.isFinite(idxNum) &&
+        Array.isArray(c.righeArticolo) &&
+        c.righeArticolo[idxNum]) {
+
+      const r = c.righeArticolo[idxNum] || {};
+      const totRiga = Math.max(1, Number(r.qta || totComm));
+      const fasiR = Array.isArray(r.fasi) ? r.fasi : [];
+
+      if (fasiR.length){
+        const arr = fasiR
+          .filter(f => !(f?.unaTantum || f?.once))
+          .map(f => Math.max(0, Number(f.qtaProdotta || 0)));
+        if (arr.length){
+          return Math.max(0, Math.min(totRiga, Math.min(...arr)));
+        }
+      }
+
+      // fallback riga senza fasi quantitative
+      return Math.max(0, Math.min(totRiga, Number(r.qtaProdotta || 0) || 0));
+    }
+
+    // 2) Fallback legacy globale
+    return producedPieces(c);
+  }
+
+  function residualPiecesUI(c, rigaIdx){
+    if (!c) return 0;
+    const totComm = Math.max(1, Number(c.qtaPezzi || 1));
+    const idxNum =
+      (rigaIdx === '' || rigaIdx == null) ? null : Number(rigaIdx);
+
+    if (Number.isFinite(idxNum) &&
+        Array.isArray(c.righeArticolo) &&
+        c.righeArticolo[idxNum]) {
+
+      const r = c.righeArticolo[idxNum] || {};
+      const totRiga = Math.max(1, Number(r.qta || totComm));
+      const prodRiga = producedPiecesUI(c, idxNum);
+      return Math.max(0, totRiga - prodRiga);
+    }
+
+    const prodComm = producedPieces(c);
+    return Math.max(0, totComm - prodComm);
+  }
+  // ---- fine G1-UI helpers ----
+
   // ---- jobId da hash ?job=... o da 'qrJob' persistito ----
   const [jobId, setJobId] = React.useState('');
   React.useEffect(()=>{
@@ -16304,8 +16953,47 @@ var TimbraturaMobileView = function(){
   const commesse   = React.useMemo(()=> lsGet('commesseRows', []), [refresh]);
   const oreRows    = React.useMemo(()=> lsGet('oreRows', []), [refresh]);
 
-  const commessa = React.useMemo(()=> (Array.isArray(commesse)?commesse:[]).find(c=>String(c.id)===String(jobId)) || null, [commesse, jobId]);
-  const fasi     = React.useMemo(()=> Array.isArray(commessa?.fasi) ? commessa.fasi : [], [commessa]);
+  const commessa = React.useMemo(
+    ()=> (Array.isArray(commesse)?commesse:[]).find(c=>String(c.id)===String(jobId)) || null,
+    [commesse, jobId]
+  );
+  
+    // === G1-DATA: normalizza fasi per-riga appena apro la timbratura ===
+  React.useEffect(() => {
+    if (!commessa) return;
+
+    try {
+      // 1) normalizza rowId (se helper esiste)
+      const normIds = (typeof window.ensureCommessaRowIds === 'function')
+        ? window.ensureCommessaRowIds(commessa)
+        : commessa;
+
+      // 2) normalizza fasi per-riga
+      const norm = (typeof window.ensureCommessaRowFasi === 'function')
+        ? window.ensureCommessaRowFasi(normIds)
+        : normIds;
+
+      if (norm === commessa) return; // nessun cambiamento → stop
+
+      const all = lsGet('commesseRows', []);
+      const ix = all.findIndex(x => String(x.id) === String(commessa.id));
+      if (ix >= 0) {
+        all[ix] = norm;
+        lsSet('commesseRows', all);
+        setRefresh(r => r + 1);   // rilegge subito la commessa normalizzata
+        window.__anima_dirty = true;
+        console.log('Timbratura: commessa normalizzata a fasi per-riga ✅', commessa.id);
+      }
+    } catch (e) {
+      console.warn('Timbratura normalize per-riga failed:', e);
+    }
+  }, [commessa]);
+
+  // fasi legacy globali commessa (NON dipendono da rigaIdx)
+  const fasiLegacy = React.useMemo(
+    ()=> Array.isArray(commessa?.fasi) ? commessa.fasi : [],
+    [commessa]
+  );
 
     // Stato rete (badge ONLINE/OFFLINE)
     const [isOnline, setIsOnline] = React.useState(navigator.onLine);
@@ -16332,6 +17020,23 @@ var TimbraturaMobileView = function(){
     const valid = Array.isArray(righe) ? righe.filter(r => String(r?.codice||'').trim() || String(r?.descrizione||'').trim()) : [];
     if (valid.length === 1) setRigaIdx('0');
   }, [commessa, righe]);
+
+    // fasi effettive: per-riga se disponibili, altrimenti legacy globali
+  const fasi = React.useMemo(() => {
+    if (!commessa) return [];
+    const idx = (rigaIdx !== '' && rigaIdx != null) ? Number(rigaIdx) : null;
+
+    if (
+      Number.isFinite(idx) &&
+      Array.isArray(righe) &&
+      righe[idx] &&
+      Array.isArray(righe[idx].fasi) &&
+      righe[idx].fasi.length
+    ){
+      return righe[idx].fasi;
+    }
+    return fasiLegacy;
+  }, [commessa, righe, rigaIdx, fasiLegacy]);
 
   // ---- Stato form ----
   const [operatore, setOperatore] = React.useState('');
@@ -16522,8 +17227,40 @@ var TimbraturaMobileView = function(){
 
   async function confirmStop(){
     if (!askQty) return;
-    const qty = Math.max(0, Math.floor(Number((qtyVal ?? '').toString().trim() === '' ? 0 : qtyVal)));
+    const rawQty = Math.max(0, Math.floor(Number((qtyVal ?? '').toString().trim() === '' ? 0 : qtyVal)));
     const act = askQty.snapshot || active;
+
+    // clamp per-riga/per-fase (se non è extra gas)
+    let qty = rawQty;
+    try{
+      if (!(gasChange || (act && act.isGasChange))){
+        const cNow = commessa;
+        const totComm = Math.max(1, Number(cNow?.qtaPezzi || 1));
+        const fIdxNow = (act && act.faseIdx!=null) ? Number(act.faseIdx) : Number(faseIdx);
+
+        const rIdxNow = (act && act.rigaIdx!=null)
+          ? Number(act.rigaIdx)
+          : ((rigaIdx===''||rigaIdx==null) ? null : Number(rigaIdx));
+
+        if (cNow && Number.isFinite(rIdxNow) && Array.isArray(cNow.righeArticolo) && cNow.righeArticolo[rIdxNow]) {
+          const rNow = cNow.righeArticolo[rIdxNow];
+          const totRiga = Math.max(1, Number(rNow?.qta || totComm));
+          const curProd = Math.max(0, Number(rNow?.fasi?.[fIdxNow]?.qtaProdotta || 0));
+          const residFase = Math.max(0, totRiga - curProd);
+          if (qty > residFase) {
+            qty = residFase;
+            (window.toast||alert)(`Quantità ridotta a residuo riga (${residFase}).`);
+          }
+        } else if (cNow && Array.isArray(cNow.fasi) && cNow.fasi[fIdxNow]) {
+          const curProd = Math.max(0, Number(cNow.fasi[fIdxNow].qtaProdotta || 0));
+          const residFase = Math.max(0, totComm - curProd);
+          if (qty > residFase) {
+            qty = residFase;
+            (window.toast||alert)(`Quantità ridotta a residuo commessa (${residFase}).`);
+          }
+        }
+      }
+    }catch{}
 
     const oreMin  = askQty.minsEff;
     const ore     = +(oreMin/60).toFixed(2);
@@ -16614,38 +17351,58 @@ var TimbraturaMobileView = function(){
       const ix = all.findIndex(c => String(c.id) === String(jobId));
       if (ix >= 0) {
         const c = { ...all[ix] };
-        const tot = Math.max(1, Number(c.qtaPezzi || 1));
+        const totComm = Math.max(1, Number(c.qtaPezzi || 1));
         const fIdx = Number(act.faseIdx);
 
-        if (Array.isArray(c.fasi) && c.fasi[fIdx]) {
-          const prevF = Math.max(0, Number(c.fasi[fIdx].qtaProdotta || 0));
-          c.fasi[fIdx] = { ...c.fasi[fIdx], qtaProdotta: Math.max(0, Math.min(tot, prevF + qty)) };
+        // 1) prova modello per-riga (se ho rigaIdx e fasi sulla riga)
+        let didPerRiga = false;
+        const rigaIdxNum = (act && act.rigaIdx != null) ? Number(act.rigaIdx) : null;
+
+        if (Number.isFinite(rigaIdxNum) && Array.isArray(c.righeArticolo) && c.righeArticolo[rigaIdxNum]) {
+          const righeNew = c.righeArticolo.map((rr) => ({ ...rr }));
+          const r = { ...righeNew[rigaIdxNum] };
+
+          const totRiga = Math.max(1, Number(r.qta || totComm));
+          if (Array.isArray(r.fasi) && r.fasi[fIdx]) {
+            const prevRF = Math.max(0, Number(r.fasi[fIdx].qtaProdotta || 0));
+            r.fasi = r.fasi.map((ff, j) => j === fIdx
+              ? { ...ff, qtaProdotta: Math.max(0, Math.min(totRiga, prevRF + qty)) }
+              : ff
+            );
+            righeNew[rigaIdxNum] = r;
+            c.righeArticolo = righeNew;
+            didPerRiga = true;
+          }
         }
+
+        // 2) fallback legacy: aggiorna fasi globali solo se NON ho aggiornato per-riga
+        if (!didPerRiga && Array.isArray(c.fasi) && c.fasi[fIdx]) {
+          const prevF = Math.max(0, Number(c.fasi[fIdx].qtaProdotta || 0));
+          c.fasi[fIdx] = { ...c.fasi[fIdx], qtaProdotta: Math.max(0, Math.min(totComm, prevF + qty)) };
+        }
+
+        // 3) ricalcolo produzione
         c.qtaProdotta = producedPieces(c);
-        all[ix] = c; lsSet('commesseRows', all); window.__anima_dirty = true;
+
+        all[ix] = c;
+        lsSet('commesseRows', all);
+        window.__anima_dirty = true;
 
         // Etichette colli: apri quando completo (una sola volta)
         const prod = (typeof window.producedPieces === 'function')
           ? window.producedPieces(c)
           : Math.max(0, Number(c.qtaProdotta || 0));
-                const justCompleted = (prod >= tot) && !c.__completedAt;
+        const justCompleted = (prod >= totComm) && !c.__completedAt;
         if (justCompleted) {
-          // segno completamento una volta sola
           c.__completedAt = new Date().toISOString();
-          all[ix] = c; 
-          lsSet('commesseRows', all);
-
-          // usa la logica centrale: scarico + colli + etichette (no doppi popup)
+          all[ix] = c; lsSet('commesseRows', all);
           try {
-            if (typeof window._maybeAutoScaricoAndLabels === 'function') {
-              window._maybeAutoScaricoAndLabels(c.id);
-            } else if (typeof window.openEtichetteColliDialog === 'function') {
-              // fallback vecchio, se per qualche motivo non trovasse _maybeAuto...
+            if (typeof window.openEtichetteColliDialog === 'function') {
               window.openEtichetteColliDialog(c);
+            } else if (typeof window.triggerEtichetteFor === 'function') {
+              window.triggerEtichetteFor(c, {});
             }
-          } catch (e) {
-            console.warn('Etichette colli al completamento:', e);
-          }
+          } catch {}
         }
       }
     }catch{}
@@ -16721,16 +17478,27 @@ var TimbraturaMobileView = function(){
         )
       ),
 
-      commessa && e('div',{className:'card', style:{marginBottom:8}},
-        e('table',{className:'table two-cols'},
-          e('tbody',null,
-            e('tr',null, e('th',null,'Descrizione'), e('td',null, commessa.descrizione || '-')),
-            e('tr',null, e('th',null,'Q.tà totale'),      e('td',null, String(Math.max(1, Number(commessa?.qtaPezzi || 1))))),
-            e('tr',null, e('th',null,'Prodotta finora'),  e('td',null, String(producedPieces(commessa)))),
-            e('tr',null, e('th',null,'Residua'),          e('td',null, String(Math.max(0, Math.max(1, Number(commessa?.qtaPezzi||1)) - producedPieces(commessa)))))
+      commessa && (function(){
+        const totComm = Math.max(1, Number(commessa?.qtaPezzi || 1));
+        const rIdxNum = (rigaIdx===''||rigaIdx==null) ? null : Number(rigaIdx);
+        const hasRow  = Number.isFinite(rIdxNum) && Array.isArray(commessa?.righeArticolo) && commessa.righeArticolo[rIdxNum];
+
+        const rSel = hasRow ? commessa.righeArticolo[rIdxNum] : null;
+        const totUI   = hasRow ? Math.max(1, Number(rSel?.qta || totComm)) : totComm;
+        const prodUI  = producedPiecesUI(commessa, rIdxNum);
+        const residUI = Math.max(0, totUI - prodUI);
+
+        return e('div',{className:'card', style:{marginBottom:8}},
+          e('table',{className:'table two-cols'},
+            e('tbody',null,
+              e('tr',null, e('th',null,'Descrizione'), e('td',null, commessa.descrizione || '-')),
+              e('tr',null, e('th',null, hasRow ? 'Q.tà riga' : 'Q.tà totale'), e('td',null, String(totUI))),
+              e('tr',null, e('th',null, hasRow ? 'Prodotta riga' : 'Prodotta finora'), e('td',null, String(prodUI))),
+              e('tr',null, e('th',null, hasRow ? 'Residua riga' : 'Residua'), e('td',null, String(residUI)))
+            )
           )
-        )
-      ),
+        );
+      })(),
 
       // Commessa + QR
       e('div', {className:'card', style:{marginBottom:8}},
