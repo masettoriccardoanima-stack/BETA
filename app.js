@@ -1228,12 +1228,32 @@ window.navigateTo = window.navigateTo || function(label){
 window.safeSetJSON = window.safeSetJSON || function(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch{} };
 window.saveKey = window.saveKey || function(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch{} };
 
-// === PATCH E6: Supabase helpers (getSB/sbInsert) compatibili coi 9/10 ===
+// === PATCH E6: Supabase helpers (getSB/sbInsert) compatibili e env-aware ===
 window.getSB = window.getSB || function(){
-  try{ const a = JSON.parse(localStorage.getItem('appSettings')||'{}')||{}; 
-       if(a.supabaseUrl && a.supabaseKey) return { url:a.supabaseUrl, key:a.supabaseKey, table:(a.syncTable||'anima_sync') };
-  }catch{}
-  return null;
+  try{
+    const a = JSON.parse(localStorage.getItem('appSettings')||'{}')||{};
+    const env = String(a.cloudEnv || a.supabaseEnv || '').toLowerCase();
+
+    const url = (env === 'beta')
+      ? (a.supabaseUrlBeta || a.supabaseUrl || '')
+      : (a.supabaseUrl || '');
+
+    const key = (env === 'beta')
+      ? (a.supabaseKeyBeta || a.supabaseKey || '')
+      : (a.supabaseKey || '');
+
+    const table = (env === 'beta')
+      ? (a.supabaseTableBeta || a.supabaseTable || a.syncTable || 'anima_sync')
+      : (a.supabaseTable || a.syncTable || 'anima_sync');
+
+    if (!(a.cloudEnabled && url && key)) return null;
+
+    return {
+      url: String(url).replace(/\/+$/,''),
+      key: String(key).trim(),
+      table: String(table || 'anima_sync')
+    };
+  }catch{ return null; }
 };
 // Patch I — Alias robusto per ReportView
 (function(){
